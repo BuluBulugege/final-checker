@@ -104,9 +104,9 @@ class GCPConfig(BaseModel):
     tpm_tokens_per_request: int = 200_000
     tpm_probe_max_requests: int = 40
     tpm_probe_concurrency: int = 8
-    # Only measure rate/throughput for this many generative models (cheapest/
-    # most-capable first); enumeration still lists ALL models.
-    rate_probe_max_models: int = 3
+    # Only measure rate/throughput for this many generative models (priority
+    # list gets tested first: Claude + gemini-3.x, then fallback to other gemini).
+    rate_probe_max_models: int = 12
 
 
 class Settings(BaseSettings):

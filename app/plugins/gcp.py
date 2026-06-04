@@ -506,35 +506,52 @@ class GCPPlugin(CheckerPlugin):
                 "Vertex: 未枚举到模型 (aiplatform API 可能未启用或无访问权限)"
             )
 
-        # 3) Pick generative Gemini models actually callable, then measure
-        #    RPM (small fast calls) and TPM (large-token calls). full_load only.
-        probe_region = getattr(cfg, "probe_region", "us-central1")
-        gen_candidates = sorted(
+        # 3) Pick models to measure RPM/TPM. User specified priority models that
+        #    need global location or special formats (Claude, image, 3.x preview).
+        #    Strategy: try user priority list first, fall back to callable gemini.
+        priority_models = [
+            # Claude (anthropic publisher, :rawPredict, global only for this project)
+            "claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5",
+            "claude-opus-4-5", "claude-opus-4-6", "claude-sonnet-4-6",
+            "claude-opus-4-7", "claude-opus-4-8",
+            # Gemini 3.x (google publisher, some global-only, some image)
+            "gemini-3.1-pro-preview", "gemini-3.1-flash-image-preview",
+            "gemini-3-pro-preview", "gemini-3.5-flash",
+        ]
+        # Filter to models actually in the enumerated list.
+        to_check = [m for m in priority_models if m in all_models]
+        # Add generic gemini text models as fallback.
+        gen_fallback = sorted(
             m for m in all_models
-            if m.startswith("gemini") and "embedding" not in m and "image" not in m
+            if m.startswith("gemini") and "embedding" not in m and "image" not in m and m not in to_check
         )
-        max_models = int(getattr(cfg, "rate_probe_max_models", 3) or 3)
+        to_check.extend(gen_fallback)
 
-        if ctx.full_load and gen_candidates:
-            # verify callability first (cheap), keep the ones that answer
-            callable_models = await self._filter_callable(
-                ctx, token, project, probe_region, gen_candidates
+        if ctx.full_load and to_check:
+            # verify callability (200 or 429 for both regional and global endpoints)
+            callable_models = await self._filter_callable_multi_loc(
+                ctx, token, project, to_check
             )
+            max_models = int(getattr(cfg, "rate_probe_max_models", 12) or 12)
             measure = callable_models[:max_models]
             rate_report: dict[str, Any] = {}
-            for model in measure:
-                rpm = await self._measure_rpm(ctx, token, project, probe_region, model, cfg)
-                tpm = await self._measure_tpm(ctx, token, project, probe_region, model, cfg)
-                rate_report[model] = {"rpm": rpm, "tpm": tpm}
-                result.remarks.append(
-                    f"{model}: RPM {rpm['label']} · TPM {tpm['label']}"
-                )
+            for model, location in measure:
+                rpm = await self._measure_rpm(ctx, token, project, location, model, cfg)
+                # TPM: skip image models (RPM-only), measure text/Claude models.
+                if "image" in model:
+                    rate_report[model] = {"location": location, "rpm": rpm, "tpm": "N/A (图像模型)"}
+                    result.remarks.append(f"{model}: RPM {rpm['label']}")
+                else:
+                    tpm = await self._measure_tpm(ctx, token, project, location, model, cfg)
+                    rate_report[model] = {"location": location, "rpm": rpm, "tpm": tpm}
+                    result.remarks.append(
+                        f"{model}: RPM {rpm['label']} · TPM {tpm['label']}"
+                    )
             report["vertex_rate_measurements"] = {
-                "region": probe_region,
-                "note": "配额跨地区共享，单区测量即代表项目上限",
+                "note": "配额跨地区共享，实测一个 location 即代表项目上限",
                 "models": rate_report,
             }
-        elif gen_candidates:
+        elif to_check:
             result.remarks.append(
                 "RPM/TPM: 未测 (开启「全速压测」才会实际调用测量)"
             )
@@ -571,44 +588,76 @@ class GCPPlugin(CheckerPlugin):
             report["vertex"]["quota_metrics"] = quota_info
             result.remarks.append(f"配额指标: {len(quota_info)} 项 (见报告)")
 
-    async def _filter_callable(
-        self, ctx, token, project, region, models
-    ) -> list[str]:
-        """Return models that answer generateContent (200) or are rate-limited
-        (429 => exists & usable). 404 => not available to this project."""
-        async def chk(model: str) -> tuple[str, bool]:
-            url = (
-                f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
-                f"/locations/{region}/publishers/google/models/{model}:generateContent"
-            )
+    def _model_params(self, project: str, location: str, model: str, text: str, max_tokens: int = 1) -> tuple[str, dict, callable]:
+        """Return (url, body, token_extractor) for a given model. Adapts between
+        Gemini (:generateContent + contents), Claude (:rawPredict + messages),
+        and image models (responseModalities). location can be a region or 'global'."""
+        is_claude = model.startswith("claude")
+        is_image = "image" in model
+        base = (
+            f"https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}"
+            if location == "global"
+            else f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}"
+        )
+        if is_claude:
+            url = f"{base}/publishers/anthropic/models/{model}:rawPredict"
             body = {
-                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                "generationConfig": {"maxOutputTokens": 1},
+                "anthropic_version": "vertex-2023-10-16",
+                "messages": [{"role": "user", "content": text}],
+                "max_tokens": max_tokens,
             }
-            st, _d, _r = await self._get_json(ctx, url, token, method="POST", json=body)
-            return model, st in (200, 429)
+            # Claude on Vertex: usage = {input_tokens, output_tokens}
+            def extract(resp_json):
+                u = resp_json.get("usage") or {}
+                return u.get("input_tokens", 0) + u.get("output_tokens", 0)
+        else:
+            url = f"{base}/publishers/google/models/{model}:generateContent"
+            body = {
+                "contents": [{"role": "user", "parts": [{"text": text}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens},
+            }
+            if is_image:
+                body["generationConfig"]["responseModalities"] = ["IMAGE"]
+            # Gemini: usageMetadata.totalTokenCount
+            def extract(resp_json):
+                return (resp_json.get("usageMetadata") or {}).get("totalTokenCount", 0)
+        return url, body, extract
 
-        res = await asyncio.gather(*(chk(m) for m in models), return_exceptions=True)
-        return [m for item in res if not isinstance(item, Exception) for m, ok in [item] if ok]
+    async def _filter_callable_multi_loc(
+        self, ctx, token, project, models
+    ) -> list[tuple[str, str]]:
+        """Return (model, location) pairs for models callable in ANY location.
+        Tries regional probe_region first, then 'global' for models that 404 in
+        the region (Claude, gemini-3.x often live only in global). Returns pairs
+        that answer 200 or 429."""
+        probe_region = getattr(ctx.settings.gcp, "probe_region", "us-central1") if hasattr(ctx.settings, "gcp") else "us-central1"
+        sem = asyncio.Semaphore(12)
 
-    # ------------------------------------------------------------------ #
-    async def _measure_rpm(self, ctx, token, project, region, model, cfg) -> dict[str, Any]:
-        """Empirical RPM: fire small generateContent calls fast until the first
-        429 (Vertex has no rate headers). Quota is shared across regions, so one
-        region's number is the project ceiling. '≥X' when no 429 was hit."""
+        async def chk(model: str, loc: str) -> tuple[str, str, bool]:
+            async with sem:
+                url, body, _ = self._model_params(project, loc, model, "hi", 1)
+                st, _d, _r = await self._get_json(ctx, url, token, method="POST", json=body)
+                return model, loc, st in (200, 429)
+
+        # Try probe_region first for all; then try global for any that failed.
+        regional = await asyncio.gather(*(chk(m, probe_region) for m in models), return_exceptions=True)
+        ok_regional = {m: loc for item in regional if not isinstance(item, Exception) for m, loc, success in [item] if success}
+        need_global = [m for m in models if m not in ok_regional]
+        global_res = await asyncio.gather(*(chk(m, "global") for m in need_global), return_exceptions=True)
+        ok_global = {m: loc for item in global_res if not isinstance(item, Exception) for m, loc, success in [item] if success}
+        # Merge, preserving order from the input models list.
+        combined = {**ok_regional, **ok_global}
+        return [(m, combined[m]) for m in models if m in combined]
+
+    async def _measure_rpm(self, ctx, token, project, location, model, cfg) -> dict[str, Any]:
+        """Empirical RPM: fire small calls fast until first 429. Uses _model_params
+        to adapt between Gemini/Claude/image. '≥X' when no 429 hit."""
         import time
 
         rps = float(getattr(cfg, "rpm_probe_rps", 50.0))
         seconds = float(getattr(cfg, "rpm_probe_seconds", 8.0))
         cap = int(getattr(cfg, "rpm_probe_cap", 400))
-        url = (
-            f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
-            f"/locations/{region}/publishers/google/models/{model}:generateContent"
-        )
-        body = {
-            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-            "generationConfig": {"maxOutputTokens": 1},
-        }
+        url, body, _ = self._model_params(project, location, model, "hi", 1)
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         success = rate_limited = other = 0
         first_429: float | None = None
@@ -664,26 +713,20 @@ class GCPPlugin(CheckerPlugin):
             "label": f"{rpm}" if hit else f"≥{rpm}",
         }
 
-    async def _measure_tpm(self, ctx, token, project, region, model, cfg) -> dict[str, Any]:
-        """Empirical TPM: send LARGE inputs (~tpm_tokens_per_request tokens each)
-        and accumulate usageMetadata.totalTokenCount until a 429 (token-per-minute
-        quota saturated) or a request cap. The big-token approach is what makes a
-        few calls able to hit the TPM ceiling. '≥X' when no 429 was hit."""
+    async def _measure_tpm(self, ctx, token, project, location, model, cfg) -> dict[str, Any]:
+        """Empirical TPM: send LARGE inputs and accumulate tokens until 429. Uses
+        _model_params adapter + its token extractor for both Gemini (usageMetadata)
+        and Claude (usage.input_tokens/output_tokens). '≥X' when no 429."""
         import time
 
         per_req = int(getattr(cfg, "tpm_tokens_per_request", 200_000))
+        # Claude models have a 200k token context limit; use 100k per request.
+        if model.startswith("claude"):
+            per_req = min(per_req, 100_000)
         max_req = int(getattr(cfg, "tpm_probe_max_requests", 40))
         conc = int(getattr(cfg, "tpm_probe_concurrency", 8))
-        # ~1 token per "word " chunk; build once and reuse.
         big_text = "word " * per_req
-        url = (
-            f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
-            f"/locations/{region}/publishers/google/models/{model}:generateContent"
-        )
-        body = {
-            "contents": [{"role": "user", "parts": [{"text": big_text}]}],
-            "generationConfig": {"maxOutputTokens": 1},
-        }
+        url, body, extract_tokens = self._model_params(project, location, model, big_text, 1)
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         tokens = 0
         success = rate_limited = other = 0
@@ -700,7 +743,7 @@ class GCPPlugin(CheckerPlugin):
                 if stop.is_set():
                     return
                 resp, _e, exc = await timed_request(
-                    ctx.client, "POST", url, headers=headers, json=body, timeout=60.0
+                    ctx.client, "POST", url, headers=headers, json=body, timeout=90.0
                 )
                 now = time.monotonic()
                 if exc is not None or resp is None:
@@ -708,10 +751,8 @@ class GCPPlugin(CheckerPlugin):
                 elif resp.status_code == 200:
                     success += 1
                     try:
-                        tokens += (resp.json().get("usageMetadata") or {}).get(
-                            "totalTokenCount", 0
-                        )
-                    except ValueError:
+                        tokens += extract_tokens(resp.json())
+                    except (ValueError, KeyError, TypeError):
                         pass
                 elif resp.status_code == 429:
                     rate_limited += 1
