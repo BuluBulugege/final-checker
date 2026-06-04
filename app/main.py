@@ -220,14 +220,14 @@ if STATIC_DIR.exists():
 
 
 @app.get("/admin")
-async def admin_redirect():
-    """Redirect /admin to /static/admin.html"""
+async def admin_page():
+    """Redirect /admin to admin interface"""
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/static/admin.html")
+    return RedirectResponse(url="/static/admin.html", status_code=302)
 
 
 @app.get("/")
-async def root():
+async def root_page():
     """Root endpoint - redirect to main UI"""
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/static/index.html")
+    return RedirectResponse(url="/static/index.html", status_code=302)
