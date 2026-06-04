@@ -117,30 +117,48 @@ async function handleLogin(e) {
   e.preventDefault();
   const password = els.password.value;
 
+  console.log('[DEBUG] handleLogin 开始');
+  console.log('[DEBUG] 密码长度:', password.length);
+
   if (!password) {
     showLoginError("请输入密码");
     return;
   }
 
   try {
+    console.log('[DEBUG] 发送认证请求...');
     const res = await fetch(`${API_BASE}/auth`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password }),
     });
 
+    console.log('[DEBUG] 响应状态:', res.status, res.ok);
+
     if (!res.ok) {
       const err = await res.json();
+      console.log('[DEBUG] 认证失败:', err);
       throw new Error(err.detail || "登录失败");
     }
 
     const data = await res.json();
+    console.log('[DEBUG] 认证成功，token 长度:', data.token?.length);
+
     authToken = data.token;
     localStorage.setItem("adminToken", authToken);
+    console.log('[DEBUG] Token 已保存到 localStorage');
+
+    console.log('[DEBUG] 准备显示主界面...');
+    console.log('[DEBUG] loginScreen 元素:', els.loginScreen);
+    console.log('[DEBUG] mainApp 元素:', els.mainApp);
 
     showMainApp();
+    console.log('[DEBUG] showMainApp 已调用');
+
     loadKeys();
+    console.log('[DEBUG] loadKeys 已调用');
   } catch (err) {
+    console.error('[DEBUG] 登录异常:', err);
     showLoginError(err.message);
   }
 }
@@ -148,8 +166,8 @@ async function handleLogin(e) {
 function handleLogout() {
   authToken = null;
   localStorage.removeItem("adminToken");
-  els.loginScreen.hidden = false;
-  els.mainApp.hidden = true;
+  els.loginScreen.style.display = 'flex';
+  els.mainApp.style.display = 'none';
   els.password.value = "";
   els.loginError.textContent = "";
 }
@@ -159,8 +177,17 @@ function showLoginError(msg) {
 }
 
 function showMainApp() {
-  els.loginScreen.hidden = true;
-  els.mainApp.hidden = false;
+  console.log('[DEBUG] showMainApp 开始');
+  console.log('[DEBUG] loginScreen.hidden 设置前:', els.loginScreen.hidden);
+  console.log('[DEBUG] mainApp.hidden 设置前:', els.mainApp.hidden);
+
+  // 使用 display style 而不是 hidden 属性，更可靠
+  els.loginScreen.style.display = 'none';
+  els.mainApp.style.display = 'block';
+
+  console.log('[DEBUG] loginScreen.style.display:', els.loginScreen.style.display);
+  console.log('[DEBUG] mainApp.style.display:', els.mainApp.style.display);
+  console.log('[DEBUG] showMainApp 完成');
 }
 
 // ============================================================

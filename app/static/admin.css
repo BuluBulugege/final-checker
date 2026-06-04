@@ -20,6 +20,11 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Force hidden attribute to work properly */
+[hidden] {
+  display: none !important;
+}
+
 body {
   font-family: "Sora", "Noto Sans SC", system-ui, sans-serif;
   background: var(--cream);
