@@ -76,6 +76,13 @@ class AnthropicConfig(BaseModel):
     )
 
 
+class GCPConfig(BaseModel):
+    request_timeout_s: float = 30.0
+    # Vertex regions to sweep when the live locations list can't be fetched.
+    # Empty -> the plugin falls back to its built-in DEFAULT_LOCATIONS.
+    locations: list[str] = Field(default_factory=list)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FC_", env_file=".env", env_nested_delimiter="__", extra="ignore"
@@ -92,6 +99,7 @@ class Settings(BaseSettings):
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
+    gcp: GCPConfig = Field(default_factory=GCPConfig)
 
 
 settings = Settings()

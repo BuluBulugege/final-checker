@@ -53,6 +53,18 @@ cat keys.txt | uv run final-checker - --mode health
   → 直接标 `企业级`。备注里列出每个模型的 RPM/ITPM/OTPM。
 - Anthropic 没有图像模型，也没有 TPD 响应头（日限是美元额度，不是速率头）。
 
+### GCP（Service Account）
+- 输入是**整块 service-account JSON**（`{"type":"service_account", ...}`）；粘进文本框即可，
+  解析器自动把 JSON 块当成一条凭证识别（其余行仍按「每行一个」）。
+- 用私钥离线签 RS256 JWT，向 `oauth2.googleapis.com/token` 换 access token（官方 `google-auth` 签名 + httpx 异步换取，不引入 `requests`）。`invalid_grant` → 密钥失效。
+- GCP 不分等级（标签固定 `GCP`），所有信息进备注 + **可下载的完整 JSON 报告**：
+  - **项目概览**：元数据、计费状态、已启用 API 数、SA 实际权限（`testIamPermissions`）
+  - **服务器**：Compute 实例跨所有 zone 聚合（运行 / 总计 / 各区）
+  - **数据库**：Cloud SQL / AlloyDB / Spanner / Firestore 各自数量
+  - **Vertex 模型**：扫所有 region 的 publisher + 调优模型；RPM/TPM 优先读 Cloud Quotas 配额，拿不到则留模型清单
+- 备注塞不下的完整信息 → 行内有「⬇ 下载完整信息」按钮，点击下载该 key 的 `gcp-<project>.json`
+  （报告通过 `GET /api/jobs/{id}/download/{index}` 单独提供，不塞进 SSE 流）。
+
 ## 架构（插拔式）
 
 ```
@@ -67,7 +79,9 @@ app/
   plugins/
     base.py        插件契约：matches / health_check / grade_check
     registry.py    自动发现：放一个含 PLUGIN 实例的模块即自动注册
-    gemini.py  openai.py  anthropic.py
+    gemini.py  openai.py  anthropic.py  gcp.py
+  parsing.py       输入解析：JSON 块（GCP）当一条，其余按行
+  redact.py        密钥脱敏：从任何错误/详情字符串里抹掉 key 形状的串
   static/          Neo-Brutalism Web UI
 ```
 

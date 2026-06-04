@@ -334,6 +334,7 @@ input[type="range"]::-moz-range-thumb {
 .prov-gemini { background: var(--blue); color: #fff; }
 .prov-openai { background: var(--green); color: #fff; }
 .prov-anthropic { background: var(--orange); color: #fff; }
+.prov-gcp { background: var(--yellow); color: var(--ink); }
 .prov-unknown { background: #ccc; }
 
 /* status chips */
@@ -382,6 +383,22 @@ input[type="range"]::-moz-range-thumb {
 .remarks-list li { padding-left: 0.8rem; position: relative; }
 .remarks-list li::before { content: "▸"; position: absolute; left: 0; color: var(--orange); }
 .row-error { color: var(--red); font-weight: 700; font-size: 0.74rem; }
+
+.dl-btn {
+  display: inline-block;
+  margin-top: 0.4rem;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-decoration: none;
+  color: var(--ink);
+  background: var(--yellow);
+  padding: 0.25rem 0.6rem;
+  border: 2px solid var(--ink);
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.08s, box-shadow 0.08s;
+}
+.dl-btn:hover { transform: translate(-1px, -1px); box-shadow: var(--shadow); }
+.dl-btn:active { transform: translate(1px, 1px); box-shadow: none; }
 
 .footstrip {
   text-align: center;

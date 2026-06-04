@@ -28,7 +28,7 @@ from app.ratetest import run_burst
 # --------------------------------------------------------------------------- #
 def test_all_plugins_registered():
     names = {p.name for p in all_plugins()}
-    assert names == {"gemini", "openai", "anthropic"}
+    assert names == {"gemini", "openai", "anthropic", "gcp"}
 
 
 @pytest.mark.parametrize(

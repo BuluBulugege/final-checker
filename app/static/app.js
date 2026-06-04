@@ -40,8 +40,52 @@ async function init() {
 }
 
 function countKeys() {
-  const n = els.keys.value.split("\n").map((l) => l.trim()).filter(Boolean).length;
-  els.keyCount.textContent = n;
+  els.keyCount.textContent = countCredentials(els.keys.value);
+}
+
+// Mirror of the server's parse_credentials: each balanced top-level {...} JSON
+// block counts as one credential; remaining non-empty lines count one each.
+function countCredentials(raw) {
+  let count = 0;
+  let i = 0;
+  const n = raw.length;
+  let lineBuf = "";
+  const flushLines = (text) => {
+    text.split("\n").forEach((l) => {
+      if (l.trim()) count++;
+    });
+  };
+  while (i < n) {
+    if (raw[i] === "{") {
+      let depth = 0,
+        inStr = false,
+        esc = false,
+        j = i;
+      for (; j < n; j++) {
+        const c = raw[j];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === "\\") esc = true;
+          else if (c === '"') inStr = false;
+        } else if (c === '"') inStr = true;
+        else if (c === "{") depth++;
+        else if (c === "}") {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      if (depth !== 0) break;
+      flushLines(lineBuf);
+      lineBuf = "";
+      count++; // the JSON block
+      i = j + 1;
+    } else {
+      lineBuf += raw[i];
+      i++;
+    }
+  }
+  flushLines(lineBuf);
+  return count;
 }
 
 function selectMode(btn) {
@@ -193,6 +237,12 @@ function remarks(r) {
     html += `<ul class="remarks-list">${r.remarks
       .map((x) => `<li>${escapeHtml(x)}</li>`)
       .join("")}</ul>`;
+  }
+  if (r.download_filename && currentJob) {
+    const url = `/api/jobs/${encodeURIComponent(currentJob)}/download/${r.index}`;
+    html += `<a class="dl-btn" href="${url}" download="${escapeHtml(
+      r.download_filename
+    )}">⬇ 下载完整信息</a>`;
   }
   if (r.error) html += `<div class="row-error">⚠ ${escapeHtml(r.error)}</div>`;
   return html || "—";

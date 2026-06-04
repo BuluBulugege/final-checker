@@ -94,6 +94,12 @@ class KeyResult(BaseModel):
     progress: float = 0.0  # 0..1 for this key's own checks
     progress_label: str | None = None
     error: str | None = None
+    # Optional large downloadable report (e.g. a full GCP scan). When set, the UI
+    # shows a "下载" button next to the (necessarily summarized) remarks.
+    # download_text is excluded from normal serialization (it can be large); it is
+    # served only via the dedicated /download endpoint.
+    download_filename: str | None = None
+    download_text: str | None = Field(default=None, exclude=True)
 
 
 class JobRequest(BaseModel):

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.jobs import manager
 from app.models import JobRequest, JobSnapshot
+from app.parsing import parse_credentials
 from app.plugins.registry import all_plugins
 
 app = FastAPI(title="final-checker", description="Pluggable API key checker")
@@ -43,8 +44,7 @@ async def get_config() -> dict:
 
 
 def _parse_keys(raw: str) -> list[str]:
-    keys = [line.strip() for line in raw.splitlines()]
-    keys = [k for k in keys if k]
+    keys = parse_credentials(raw)
     if not keys:
         raise HTTPException(400, "no keys provided")
     if len(keys) > settings.max_keys_per_job:
@@ -65,6 +65,30 @@ async def get_job(job_id: str) -> JobSnapshot:
     if job is None:
         raise HTTPException(404, "job not found")
     return job.summary()
+
+
+@app.get("/api/jobs/{job_id}/download/{index}")
+async def download_report(job_id: str, index: int):
+    """Return the full downloadable report for one key result (e.g. a GCP scan)
+    that was too large to show inline in the remarks."""
+    job = manager.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if index < 0 or index >= len(job.results):
+        raise HTTPException(404, "result not found")
+    r = job.results[index]
+    if not r.download_text:
+        raise HTTPException(404, "no downloadable report for this result")
+    from fastapi.responses import Response
+
+    filename = r.download_filename or f"report-{index}.txt"
+    return Response(
+        content=r.download_text,
+        media_type="application/json"
+        if filename.endswith(".json")
+        else "text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/jobs/{job_id}/cancel")

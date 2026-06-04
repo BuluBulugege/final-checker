@@ -40,7 +40,9 @@ def main() -> None:
 
 
 async def _run(req: JobRequest) -> None:
-    keys = [line.strip() for line in req.keys.splitlines() if line.strip()]
+    from app.parsing import parse_credentials
+
+    keys = parse_credentials(req.keys)
     if not keys:
         print("no keys provided", file=sys.stderr)
         sys.exit(1)
@@ -50,7 +52,7 @@ async def _run(req: JobRequest) -> None:
 
     print(f"\n{'#':<3} {'provider':<10} {'status':<11} {'tier':<10} masked")
     print("-" * 70)
-    for r in job.summary().results:
+    for r in job.results:
         print(
             f"{r.index:<3} {(r.provider or '-'):<10} {r.status.value:<11} "
             f"{(r.tier or '-'):<10} {r.masked_key}"
@@ -59,6 +61,11 @@ async def _run(req: JobRequest) -> None:
             print(f"      ↳ {note}")
         if r.error:
             print(f"      ! {r.error}")
+        # Persist any large downloadable report (e.g. a GCP scan) next to cwd.
+        if r.download_text and r.download_filename:
+            with open(r.download_filename, "w", encoding="utf-8") as fh:
+                fh.write(r.download_text)
+            print(f"      ⬇ 完整报告已保存: {r.download_filename}")
 
     graded = sum(1 for r in job.results if r.status in {KeyStatus.GRADED, KeyStatus.ALIVE})
     print(f"\n{graded}/{len(job.results)} keys checked OK")

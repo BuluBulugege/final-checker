@@ -1,0 +1,224 @@
+{
+  "summary": "Research GCP REST endpoints for SA-key scanning: token exchange, Vertex models, Compute, databases, project/API/quota",
+  "agentCount": 4,
+  "logs": [],
+  "result": {
+    "research": [
+      {
+        "area": "auth",
+        "endpoints": [
+          {
+            "purpose": "Exchange service account JWT assertion for OAuth2 access token via JWT bearer grant",
+            "method": "POST",
+            "url": "https://oauth2.googleapis.com/token",
+            "auth": "None (JWT assertion in body proves identity)",
+            "response_fields": "access_token (string), token_type (Bearer), expires_in (seconds, typically 3600), scope (granted scopes)",
+            "notes": "Content-Type must be application/x-www-form-urlencoded. Request body contains exactly two fields: grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer and assertion=<signed-jwt>. The JWT must be RS256-signed with the service account private_key. Successful response includes access_token valid for expires_in seconds."
+          }
+        ],
+        "gotchas": "\n**JWT Assertion Structure (RS256 signed):**\n- Header: {alg: \"RS256\", typ: \"JWT\"}\n- Payload claims required:\n  - iss: service_account.client_email (issuer = service account email)\n  - aud: \"https://oauth2.googleapis.com/token\" (audience = token endpoint)\n  - scope: space-delimited scopes (e.g., \"https://www.googleapis.com/auth/cloud-platform\")\n  - iat: Unix epoch seconds at time of creation (current timestamp)\n  - exp: Unix epoch seconds + 3600 (exactly 1 hour later; max lifetime)\n  - sub: (optional) user email for domain-wide delegation only\n- Additional claims can be merged in via additional_claims parameter\n- Signed with service_account.private_key via RS256\n\n**google-auth Compatibility:**\n- google.oauth2.service_account.Credentials._make_authorization_grant_assertion() produces exactly this JWT payload structure\n- Claims: iat, exp, iss (service_account_email), aud (_GOOGLE_OAUTH2_TOKEN_ENDPOINT), scope (scopes_to_string), plus any additional_claims\n- The method signs via jwt.encode(self._signer, payload) using the private key\n- You can build this assertion offline and sign with any RS256 JWT library, then POST via httpx without the SDK\n\n**Error Detection - invalid_grant (400 response):**\n- Indicates JWT/grant validation failure; generic error_description from Google\n- Causes: (1) JWT signature invalid (wrong private key, malformed JWT, incorrect encoding), (2) service account key revoked in Cloud Console, (3) JWT claims malformed or outside acceptable range, (4) iss/aud/scope mismatches\n- Response format: JSON with error: \"invalid_grant\", error_description: (varies - may mention signature, token expired/revoked, or account not found)\n- To detect revoked key: attempt token request; if 400 invalid_grant persists on valid JWT structure, key is revoked—verify in Cloud Console service account keys section\n- Valid key produces 200 JSON response with access_token, expires_in, token_type, scope\n\n**cloud-platform Scope:**\n- https://www.googleapis.com/auth/cloud-platform grants full read+write access to all Google Cloud APIs\n- https://www.googleapis.com/auth/cloud-platform.read-only grants read-only access\n- Following least-privilege: use narrower scopes (e.g., https://www.googleapis.com/auth/cloud-storage for Storage only) when possible\n- In cloud-platform scope: can list/describe resources, but actual IAM roles on the service account further restrict actions\n\n**Form Encoding:**\n- POST body Content-Type: application/x-www-form-urlencoded\n- URL-encode both parameter names and values: grant_type must be URL-encoded as urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer\n- assertion parameter is the complete signed JWT (no additional encoding of the JWT itself, passed as-is)\n- Request format: grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&amp;assertion=<jwt-here>\n",
+        "citations": [
+          "https://developers.google.com/identity/protocols/oauth2/service-account",
+          "https://datatracker.ietf.org/doc/html/rfc7523",
+          "https://www.nango.dev/blog/google-oauth-invalid-grant-token-has-been-expired-or-revoked",
+          "https://www.thornelabs.net/posts/resolve-google-cloud-api-oauth2-cannot-fetch-token-invalid-grant-error",
+          "https://www.w3tutorials.net/blog/jwt-invalid-grant-in-signature-in-google-oauth2",
+          "https://googleapis.dev/python/google-auth/latest/reference/google.oauth2.service_account.html",
+          "https://googleapis.dev/python/google-auth/latest/_modules/google/oauth2/service_account.html",
+          "https://developers.google.com/identity/protocols/oauth2/scopes"
+        ]
+      },
+      {
+        "area": "vertex",
+        "endpoints": [
+          {
+            "purpose": "List all supported locations/regions for a project",
+            "method": "GET",
+            "url": "https://aiplatform.googleapis.com/v1/projects/{project}/locations",
+            "auth": "Authorization header with OAuth2 Bearer token; requires cloud.locations.list IAM permission",
+            "response_fields": "locations[].locationId, locations[].displayName",
+            "notes": "Returns ListLocationsResponse with all regions where Vertex AI services are available. Standard locations include us-central1, us-east5, us-south1, europe-west1, europe-west4, europe-central2, europe-north1, europe-southwest1, asia-southeast1, and others. Supports multi-region endpoints (us, eu). Use regional endpoints for data residency; use global endpoint for availability."
+          },
+          {
+            "purpose": "List all Google and partner publisher models in Model Garden",
+            "method": "GET",
+            "url": "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models",
+            "auth": "Authorization header with OAuth2 Bearer token; requires aiplatform.googleapis.com access",
+            "response_fields": "models[].name, models[].displayName, models[].supportedActions, models[].versionId, nextPageToken",
+            "notes": "Pagination supported via pageSize (max ~100) and pageToken parameters. Alternative endpoint: GET https://{location}-aiplatform.googleapis.com/v1/publishers/google/models for top-level publisher models. Also supports /publishers/*/models to list from all publishers (Google, Mistral, Anthropic Claude, etc.). Response includes model metadata, supported actions (generateContent, streamGenerateContent, countTokens, etc.), and version information."
+          },
+          {
+            "purpose": "List project-specific and tuned models in a location",
+            "method": "GET",
+            "url": "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/models",
+            "auth": "Authorization header with OAuth2 Bearer token; requires aiplatform.googleapis.com access",
+            "response_fields": "models[].name, models[].displayName, models[].metadata, nextPageToken",
+            "notes": "Lists custom-trained and tuned models for the project. Pagination with pageSize and pageToken. Use filter parameter to narrow results (e.g., filter=display_name:gemini)."
+          },
+          {
+            "purpose": "Query quota and rate limit information via Cloud Quotas API",
+            "method": "GET",
+            "url": "https://cloudquotas.googleapis.com/v1/projects/{projectNumber}/locations/global/services/aiplatform.googleapis.com/quotaInfos",
+            "auth": "Authorization header with OAuth2 Bearer token; requires cloudquotas.admin IAM role",
+            "response_fields": "quotaInfos[].name, quotaInfos[].displayName, quotaInfos[].metric, quotaInfos[].quotaLimit, quotaInfos[].quotaUsage, quotaInfos[].dimensions, nextPageToken",
+            "notes": "Returns quota details for aiplatform service. Key metric IDs: aiplatform.googleapis.com/gemini_requests_per_minute (RPM), aiplatform.googleapis.com/generate_content_requests_per_minute_per_project_per_base_model, and tokens-per-minute metrics. Quota names vary by model tier; newer models use Dynamic Shared Quota (DSQ) rather than per-tier quotas. Alternative: use gcloud command: gcloud beta quotas info list --service=aiplatform.googleapis.com"
+          },
+          {
+            "purpose": "Generate content via Gemini to measure empirical RPM/TPM",
+            "method": "POST",
+            "url": "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent",
+            "auth": "Authorization header with OAuth2 Bearer token; requires aiplatform.googleapis.com access",
+            "response_fields": "candidates[].content.parts, usageMetadata.promptTokenCount, usageMetadata.candidatesTokenCount, usageMetadata.totalTokenCount",
+            "notes": "Non-streaming generateContent endpoint for Gemini models (e.g., gemini-2.5-flash, gemini-2.0-pro). Send minimal request: {\"contents\":[{\"parts\":[{\"text\":\"hi\"}]}]} to measure RPM quota consumption with minimal token usage. Streaming variant: replace :generateContent with :streamGenerateContent for Server-Sent Events response. Use usageMetadata to track token consumption for empirical TPM measurement. Model parameter can use model display names or full resource IDs."
+          },
+          {
+            "purpose": "Stream generate content via Gemini (non-blocking)",
+            "method": "POST",
+            "url": "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent",
+            "auth": "Authorization header with OAuth2 Bearer token; requires aiplatform.googleapis.com access",
+            "response_fields": "response chunks with candidates[].content.parts, usageMetadata",
+            "notes": "Server-Sent Events (SSE) streaming endpoint. Same quota constraints as generateContent (RPM, TPM, RPD). Provides faster response times for interactive applications. Use for empirical quota measurement of streaming workloads."
+          }
+        ],
+        "gotchas": "REGION ENUMERATION: There is no single \\\"list all regions\\\" endpoint on aiplatform.googleapis.com directly; use the projects.locations API (requires cloud.locations.list permission). Google Cloud uses multi-region endpoints (us, eu) that automatically fail over within geography, but data residency is NOT guaranteed on global endpoint—use regional endpoints for GDPR/data residency requirements. Regions are fixed (us-central1, us-east5, etc.); model availability varies by region. QUOTA METRICS: Metric names use underscore format (gemini_requests_per_minute, not camelCase). The Cloud Quotas API requires cloudquotas.admin role and uses projectNumber (not projectId) in URLs. Per-model quotas vary: some models share quota pools (Dynamic Shared Quota / DSQ) while others have dedicated quotas. Quota information may be unreadable or sparse (especially for newer models)—fall back to empirical measurement via small generateContent requests. PAGINATION: List endpoints support pageSize (~100 max) and pageToken. No built-in region iterator in Vertex API; enumerate regions separately via projects.locations.list, then iterate region-by-region for model discovery. ERRORS: 404 on generateContent typically means model not available in that region (not permission error). 403 errors indicate IAM/authentication issues. 429 (RESOURCE_EXHAUSTED) indicates quota exceeded for RPM, TPM, or RPD. AUTHENTICATION: Bearer tokens from gcloud auth application-default print-access-token work for REST calls. Some endpoints may require X-Goog-User-Project header if permission errors occur (for service account quota project). COST: Each generateContent request counts toward RPM quota and TPM quota; use minimal requests (1-token prompts) to measure quotas without significant cost.",
+        "citations": [
+          "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/locations",
+          "https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.models/list",
+          "https://docs.cloud.google.com/vertex-ai/docs/reference/rest/v1/publishers.models",
+          "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/projects.locations.publishers.models/generateContent",
+          "https://docs.cloud.google.com/docs/quotas/reference/rest",
+          "https://docs.cloud.google.com/docs/quotas/api-overview",
+          "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/quotas",
+          "https://oneuptime.com/blog/post/2026-02-17-how-to-manage-quotas-and-rate-limits-for-gemini-api-requests-in-vertex-ai/view",
+          "https://modelavailability.com/platforms/gcp/regions",
+          "https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.publishers.models",
+          "https://docs.cloud.google.com/sdk/gcloud/reference/auth/application-default/print-access-token"
+        ]
+      },
+      {
+        "area": "compute_db",
+        "endpoints": [
+          {
+            "purpose": "List Compute Engine instances across all zones (aggregated)",
+            "method": "GET",
+            "url": "https://compute.googleapis.com/compute/v1/projects/{project}/aggregated/instances",
+            "auth": "scope: https://www.googleapis.com/auth/compute or https://www.googleapis.com/auth/compute.readonly or https://www.googleapis.com/auth/cloud-platform",
+            "response_fields": "items (dict keyed by zone name, each zone contains instances[] array with status field RUNNING/TERMINATED/STOPPING/PROVISIONING); nextPageToken; selfLink",
+            "notes": "Pagination: maxResults (0-500, default 500) and pageToken. Response structure: items[zone_name].instances[].status indicates instance state. To count RUNNING instances, filter by status='RUNNING' or iterate items dict and filter instances. Also use zones.list endpoint: GET https://compute.googleapis.com/compute/v1/projects/{project}/zones to enumerate all available zones."
+          },
+          {
+            "purpose": "List Compute Engine zones available in a project",
+            "method": "GET",
+            "url": "https://compute.googleapis.com/compute/v1/projects/{project}/zones",
+            "auth": "scope: https://www.googleapis.com/auth/compute or https://www.googleapis.com/auth/compute.readonly or https://www.googleapis.com/auth/cloud-platform",
+            "response_fields": "items (array of zone objects with name, status); nextPageToken; selfLink",
+            "notes": "Returns list of available zones. Pagination: maxResults and pageToken. Use to enumerate all zones before or alongside aggregatedList instances."
+          },
+          {
+            "purpose": "List Cloud SQL instances in a project",
+            "method": "GET",
+            "url": "https://sqladmin.googleapis.com/v1/projects/{project}/instances",
+            "auth": "scope: https://www.googleapis.com/auth/sqlservice.admin or https://www.googleapis.com/auth/cloud-platform",
+            "response_fields": "items[] (DatabaseInstance objects containing state, databaseVersion, region fields); nextPageToken; kind (always 'sql#instancesList')",
+            "notes": "State values: RUNNABLE, SUSPENDED, PENDING_CREATE, MAINTENANCE, FAILED, UNKNOWN_STATE. databaseVersion examples: MYSQL_8_0, SQLSERVER_2019_STANDARD. Pagination: pageToken and nextPageToken (no maxResults). Filter parameter supports expressions like 'state:RUNNABLE instanceType:CLOUD_SQL_INSTANCE'."
+          },
+          {
+            "purpose": "List AlloyDB clusters across all locations in a project",
+            "method": "GET",
+            "url": "https://alloydb.googleapis.com/v1/projects/{project}/locations/-/clusters",
+            "auth": "scope: https://www.googleapis.com/auth/cloud-platform; IAM permission: alloydb.clusters.list",
+            "response_fields": "clusters[] (Cluster objects); nextPageToken; unreachable[] (string array of unreachable locations)",
+            "notes": "Use parent=projects/{project}/locations/- for aggregated across all locations, or parent=projects/{project}/locations/{region}/clusters for single region. Pagination: pageSize, pageToken. unreachable[] field lists locations that could not be reached."
+          },
+          {
+            "purpose": "List AlloyDB instances within clusters at specific location",
+            "method": "GET",
+            "url": "https://alloydb.googleapis.com/v1/projects/{project}/locations/{region}/clusters/{clusterId}/instances",
+            "auth": "scope: https://www.googleapis.com/auth/cloud-platform; IAM permission: alloydb.instances.list",
+            "response_fields": "instances[] (Instance objects); nextPageToken; unreachable[] (string array of unreachable locations)",
+            "notes": "To list all instances across locations/clusters, use parent=projects/{project}/locations/-/clusters/-. Pagination: pageSize, pageToken. unreachable[] indicates locations that could not be reached."
+          },
+          {
+            "purpose": "List Cloud Spanner instances in a project",
+            "method": "GET",
+            "url": "https://spanner.googleapis.com/v1/projects/{project}/instances",
+            "auth": "scope: https://www.googleapis.com/auth/spanner.admin or https://www.googleapis.com/auth/cloud-platform; IAM permission: spanner.instances.list",
+            "response_fields": "instances[] (Instance objects); nextPageToken; unreachable[] (string array of unreachable instances)",
+            "notes": "Pagination: pageSize (defaults to server max if <= 0) and pageToken. unreachable[] lists instances whose metadata couldn't be retrieved within instanceDeadline. No location enumeration needed—instances endpoint returns all in project."
+          },
+          {
+            "purpose": "List Firestore databases in a project",
+            "method": "GET",
+            "url": "https://firestore.googleapis.com/v1/projects/{project}/databases",
+            "auth": "scope: https://www.googleapis.com/auth/datastore or https://www.googleapis.com/auth/cloud-platform",
+            "response_fields": "databases[] (Database objects); unreachable[] (string array of regions where databases couldn't be listed)",
+            "notes": "NO pagination (pageToken/pageSize not supported). Optional showDeleted query parameter to include deleted databases. unreachable[] field lists regions unavailable. Returns all databases in single response."
+          }
+        ],
+        "gotchas": "PERMISSION ERRORS: GCP returns 403 PERMISSION_DENIED (not 404) for both disabled APIs and insufficient IAM roles. Disabled API errors include SERVICE_DISABLED mention in error details. A request failing with 403 could mean: API not enabled in project, IAM role missing on service account, org policy restriction, or IAM propagation delay. EMPTY LISTS: An empty or absent items[] field indicates zero resources (e.g., no instances)—this is distinct from 403. A valid API call with no matching resources returns 200 OK with empty items[]/databases[] array or absent field. PAGINATION GOTCHAS: (1) Compute Engine aggregatedList uses maxResults/pageToken, not pageSize. (2) Cloud SQL uses pageToken/nextPageToken but no maxResults parameter. (3) AlloyDB and Spanner use pageSize/pageToken. (4) Firestore has NO pagination. LOCATION ENUMERATION: (1) Compute Engine requires zones.list call OR extract zones from aggregatedList response items dict keys. (2) AlloyDB uses parent=projects/{project}/locations/-/clusters to aggregate across locations (- is wildcard). (3) Cloud Spanner returns all instances globally—no location filtering needed. (4) Cloud SQL instances endpoint returns all regions in one call. (5) Firestore may return unreachable[] regions when service unavailable in certain regions. RESPONSE STRUCTURE VARIANCE: Compute aggregatedList returns items as dict keyed by zone with nested instances array (different from list operations). AlloyDB/Spanner/Firestore return items as top-level arrays. Count field names: Compute=status field in instance object; Cloud SQL=state field in DatabaseInstance; others=no explicit count, iterate array length.",
+        "citations": [
+          "https://docs.cloud.google.com/compute/docs/reference/rest/v1/instances/aggregatedList",
+          "https://docs.cloud.google.com/compute/docs/reference/rest/v1/zones/list",
+          "https://docs.cloud.google.com/sql/docs/mysql/admin-api/rest/v1/instances/list",
+          "https://docs.cloud.google.com/alloydb/docs/reference/rest/v1/projects.locations.clusters/list",
+          "https://docs.cloud.google.com/alloydb/docs/reference/rest/v1/projects.locations.clusters.instances/list",
+          "https://docs.cloud.google.com/spanner/docs/reference/rest/v1/projects.instances/list",
+          "https://docs.cloud.google.com/firestore/docs/reference/rest/v1/projects.databases/list",
+          "https://cloud.google.com/compute/docs/regions-zones/viewing-regions-zones",
+          "https://cloud.google.com/sql/docs/mysql/admin-api",
+          "https://docs.cloud.google.com/alloydb/docs/reference/rest",
+          "https://cloud.google.com/spanner/docs/reference/rest",
+          "https://cloud.google.com/firestore/docs/reference/rest"
+        ]
+      },
+      {
+        "area": "project",
+        "endpoints": [
+          {
+            "purpose": "Get project metadata (name, projectNumber, lifecycleState)",
+            "method": "GET",
+            "url": "https://cloudresourcemanager.googleapis.com/v1/projects/{project}",
+            "auth": "OAuth 2.0 scope: https://www.googleapis.com/auth/cloud-platform or cloud-platform.read-only; Bearer token in Authorization header",
+            "response_fields": "name (project display name), projectNumber (unique numeric ID, read-only), projectId, lifecycleState (ACTIVE/DELETE_REQUESTED/DELETE_IN_PROGRESS, read-only), createTime, labels",
+            "notes": "Returns JSON with Project object. 403 PERMISSION_DENIED if service account lacks resourcemanager.projects.get permission. 404 NOT_FOUND if project doesn't exist. Cloud Resource Manager API must be enabled."
+          },
+          {
+            "purpose": "List enabled services/APIs for a project with pagination",
+            "method": "GET",
+            "url": "https://serviceusage.googleapis.com/v1/projects/{projectNumber}/services?filter=state:ENABLED&pageSize={pageSize}&pageToken={pageToken}",
+            "auth": "OAuth 2.0 scope: https://www.googleapis.com/auth/cloud-platform; Bearer token in Authorization header",
+            "response_fields": "services[] array with config.name (e.g., bigquery.googleapis.com), state (ENABLED/DISABLED), nextPageToken (if more results exist). Each service object includes name, config{name, title, documentation}, state",
+            "notes": "Pagination uses pageSize (default varies, max ~200) and pageToken. Returns 403 if SA lacks serviceusage.services.list permission. Returns 403 PERMISSION_DENIED with ErrorInfo reason=API_DISABLED if Service Usage API is not enabled (not 404). Filter parameter is required; filter=state:ENABLED returns only enabled APIs."
+          },
+          {
+            "purpose": "Get billing status and account for a project",
+            "method": "GET",
+            "url": "https://cloudbilling.googleapis.com/v1/projects/{projectId}/billingInfo",
+            "auth": "OAuth 2.0 scope: https://www.googleapis.com/auth/cloud-billing or cloud-billing.readonly or cloud-platform; Bearer token in Authorization header",
+            "response_fields": "name (projects/{projectId}/billingInfo), billingAccountName (e.g., billingAccounts/012345-567890-ABCDEF or empty if not linked), billingEnabled (boolean; true if open billing account linked, false if closed/none)",
+            "notes": "Returns 403 PERMISSION_DENIED if SA lacks cloudbilling.projects.get permission. Returns 403 with ErrorInfo reason=API_DISABLED if Cloud Billing API not enabled. billingEnabled=false means project cannot use paid services. Use billingAccountName to identify linked billing account."
+          },
+          {
+            "purpose": "Test which IAM permissions the service account actually has on a project (or read effective IAM roles)",
+            "method": "POST",
+            "url": "https://cloudresourcemanager.googleapis.com/v1/projects/{project}:testIamPermissions",
+            "auth": "OAuth 2.0 scope: https://www.googleapis.com/auth/cloud-platform; Bearer token in Authorization header. No IAM permission required to call testIamPermissions itself.",
+            "response_fields": "permissions[] array containing only the permissions from the request that the SA actually has. If empty, SA has none of the tested permissions. Example: [\"resourcemanager.projects.get\", \"resourcemanager.projects.delete\"]",
+            "notes": "Request body: {\"permissions\": [\"permission1\", \"permission2\"]}. Permissions with wildcards (e.g., 'storage.*', '*') are not allowed. Returns 403 PERMISSION_DENIED if SA cannot be identified (credential invalid). Returns 403 with ErrorInfo reason=API_DISABLED if Cloud Resource Manager API not enabled. Response permissions[] field may be empty if SA has none of the requested permissions (not an error). Useful for capability detection without triggering actual operations."
+          }
+        ],
+        "gotchas": "Pagination: Service Usage API returns nextPageToken when more results exist; include in subsequent request. Disabled API vs Permission Denied: Both return 403 HTTP status. A disabled API returns 403 with ErrorInfo reason=\"API_DISABLED\" in details, while lack of IAM permission returns 403 with reason=\"PERMISSION_DENIED\" or generic message (check error details for ErrorInfo). Use testIamPermissions to disambiguate from missing IAM role. Region/Zone: These project-level endpoints are global, not zone-specific. Permission propagation: IAM changes take up to 60 seconds to propagate; if newly granted, retry after waiting. Service account authentication: Use Bearer token in Authorization header (get token from service account key via JWT or gcloud). OAuth scopes: cloud-platform scope grants full GCP access across these APIs; narrower read-only scopes available for Billing (cloud-billing.readonly). 404 vs 403 for resources: 404 NOT_FOUND means resource doesn't exist and you have permission to check; 403 PERMISSION_DENIED covers both \"you can't access this\" and \"API is disabled\". Error response format: {error: {code: HTTP_CODE, message: string, status: STATUS_CODE, details: [{@type: string, reason: string, domain: string}]}}. testIamPermissions is idempotent and safe for probing capabilities without side effects.",
+        "citations": [
+          "https://cloud.google.com/resource-manager/reference/rest/v1/projects/get",
+          "https://docs.cloud.google.com/service-usage/docs/list-services",
+          "https://cloud.google.com/billing/docs/reference/rest/v1/projects/getBillingInfo",
+          "https://cloud.google.com/iam/docs/reference/rest/v1/projects/testIamPermissions",
+          "https://cloud.google.com/iam/docs/testing-permissions",
+          "https://developers.google.com/identity/protocols/oauth2/scopes",
+          "https://developers.google.com/identity/protocols/oauth2/service-account",
+          "https://google.aip.dev/193"
+        ]
+      }
+    ]
+  }
+}

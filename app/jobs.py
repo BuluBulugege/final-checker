@@ -61,7 +61,12 @@ class Job:
                 pass
 
     def _emit_result(self, r: KeyResult) -> None:
-        self._emit({"type": "key", "data": r.model_dump(mode="json")})
+        # Exclude the (potentially large) download_text from the live stream; the
+        # UI fetches it on demand via /download. download_filename is kept so the
+        # button can appear.
+        self._emit(
+            {"type": "key", "data": r.model_dump(mode="json", exclude={"download_text"})}
+        )
 
     def _emit_job(self) -> None:
         self._emit({"type": "job", "data": self.summary().model_dump(mode="json")})

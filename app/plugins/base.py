@@ -71,8 +71,22 @@ class CheckerPlugin(abc.ABC):
 
 
 def mask_key(key: str) -> str:
-    """Mask a key for display: keep a short prefix and last 4 chars."""
+    """Mask a credential for display: keep a short prefix and last 4 chars.
+
+    For a GCP service-account JSON block, show the (non-secret) client_email
+    instead of a meaningless brace fragment, so the row is identifiable.
+    """
     key = key.strip()
+    if key.startswith("{"):
+        try:
+            import json as _json
+
+            obj = _json.loads(key)
+            if isinstance(obj, dict) and obj.get("type") == "service_account":
+                email = obj.get("client_email") or obj.get("project_id") or "service_account"
+                return f"GCP:{email}"
+        except (ValueError, TypeError):
+            pass
     if len(key) <= 12:
         return (key[:4] + "…") if key else "(empty)"
     return f"{key[:8]}…{key[-4:]}"
