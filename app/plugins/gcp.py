@@ -519,21 +519,41 @@ class GCPPlugin(CheckerPlugin):
             "gemini-3-pro-preview", "gemini-3.5-flash",
         ]
         # Filter to models actually in the enumerated list.
-        to_check = [m for m in priority_models if m in all_models]
+        priority_in_list = [m for m in priority_models if m in all_models]
         # Add generic gemini text models as fallback.
         gen_fallback = sorted(
             m for m in all_models
-            if m.startswith("gemini") and "embedding" not in m and "image" not in m and m not in to_check
+            if m.startswith("gemini") and "embedding" not in m and "image" not in m and m not in priority_in_list
         )
-        to_check.extend(gen_fallback)
 
-        if ctx.full_load and to_check:
-            # verify callability (200 or 429 for both regional and global endpoints)
-            callable_models = await self._filter_callable_multi_loc(
-                ctx, token, project, to_check
-            )
+        if ctx.full_load and (priority_in_list or gen_fallback):
+            # Check priority models first
+            priority_callable = []
+            if priority_in_list:
+                priority_callable = await self._filter_callable_multi_loc(
+                    ctx, token, project, priority_in_list
+                )
+                callable_names = {m for m, loc in priority_callable}
+                unavailable = [m for m in priority_in_list if m not in callable_names]
+                if unavailable:
+                    result.remarks.append(
+                        f"优先模型不可用 ({len(unavailable)}): {', '.join(unavailable[:5])}"
+                        + (f" ..." if len(unavailable) > 5 else "")
+                    )
+
+            # Then check fallback models (up to max_models - priority count)
             max_models = int(getattr(cfg, "rate_probe_max_models", 12) or 12)
-            measure = callable_models[:max_models]
+            remaining_slots = max(0, max_models - len(priority_callable))
+            fallback_callable = []
+            if remaining_slots > 0 and gen_fallback:
+                fallback_check = gen_fallback[:remaining_slots * 2]  # check 2x to ensure enough
+                fallback_callable = await self._filter_callable_multi_loc(
+                    ctx, token, project, fallback_check
+                )
+                fallback_callable = fallback_callable[:remaining_slots]
+
+            # Combine: priority first, then fallback
+            measure = priority_callable + fallback_callable
             rate_report: dict[str, Any] = {}
             for model, location in measure:
                 rpm = await self._measure_rpm(ctx, token, project, location, model, cfg)
@@ -551,7 +571,7 @@ class GCPPlugin(CheckerPlugin):
                 "note": "配额跨地区共享，实测一个 location 即代表项目上限",
                 "models": rate_report,
             }
-        elif to_check:
+        elif priority_in_list or gen_fallback:
             result.remarks.append(
                 "RPM/TPM: 未测 (开启「全速压测」才会实际调用测量)"
             )
