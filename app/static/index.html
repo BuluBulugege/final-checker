@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>API Key Checker · 插拔式密钥检查器</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+<div class="grid-bg" aria-hidden="true"></div>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="brand-mark">▚</span>
+    <h1>KEY&nbsp;CHECKER</h1>
+    <span class="brand-tag">插拔式 · 测活 / 测等级</span>
+  </div>
+  <div class="plugin-pills" id="pluginPills"></div>
+</header>
+
+<main class="layout">
+  <!-- ============ CONTROL PANEL ============ -->
+  <section class="panel panel--input" aria-label="输入与配置">
+    <label class="field-label" for="keysInput">
+      API KEYS <span class="hint">每行一个 · 自动识别 Gemini / OpenAI / Anthropic</span>
+    </label>
+    <textarea id="keysInput" spellcheck="false" autocomplete="off"
+      placeholder="AIzaSy...&#10;sk-proj-...&#10;sk-ant-api03-..."></textarea>
+    <div class="key-counter"><span id="keyCount">0</span> 个密钥</div>
+
+    <div class="controls">
+      <div class="mode-toggle" role="radiogroup" aria-label="模式">
+        <button class="mode-btn is-active" data-mode="grade" role="radio" aria-checked="true">
+          测等级 <small>GRADE</small>
+        </button>
+        <button class="mode-btn" data-mode="health" role="radio" aria-checked="false">
+          测活 <small>HEALTH</small>
+        </button>
+      </div>
+
+      <div class="slider-block">
+        <label class="field-label" for="concurrency">
+          并发数 <output id="concVal">5</output>
+        </label>
+        <input type="range" id="concurrency" min="1" max="50" value="5" />
+      </div>
+
+      <label class="switch">
+        <input type="checkbox" id="fullLoad" checked />
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="switch-label">全速压测 <small>full load · 按 spec 速率，会产生真实调用与费用</small></span>
+      </label>
+    </div>
+
+    <button id="runBtn" class="run-btn">▶ 开始检查</button>
+    <button id="cancelBtn" class="cancel-btn" hidden>■ 取消</button>
+    <p class="warn" id="warnBox" hidden></p>
+  </section>
+
+  <!-- ============ RESULTS ============ -->
+  <section class="panel panel--results" aria-label="检查结果">
+    <div class="results-head">
+      <h2>结果</h2>
+      <div class="job-meta" id="jobMeta"></div>
+    </div>
+    <div class="overall-bar" id="overallBar" hidden>
+      <div class="overall-fill" id="overallFill"></div>
+      <span class="overall-text" id="overallText"></span>
+    </div>
+
+    <div class="table-wrap">
+      <table class="results-table">
+        <thead>
+          <tr>
+            <th class="col-idx">#</th>
+            <th class="col-prov">供应商</th>
+            <th class="col-key">密钥</th>
+            <th class="col-status">状态</th>
+            <th class="col-tier">等级</th>
+            <th class="col-prog">进度</th>
+            <th class="col-remarks">备注</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody">
+          <tr class="empty-row"><td colspan="7">粘贴密钥后点击「开始检查」</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer class="footstrip">
+  <span>本地运行 · 密钥仅在内存中处理，不落盘 · 返回结果已脱敏</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

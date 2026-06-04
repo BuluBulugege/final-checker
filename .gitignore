@@ -1,0 +1,35 @@
+# --- Secrets: API keys are the whole point of this tool, never commit them ---
+.env
+.env.*
+!.env.example
+*.key
+*.keys
+keys.txt
+keys/*.txt
+**/keys_input*.txt
+data.db*
+*.sqlite3
+results/
+exports/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Editor / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.log
