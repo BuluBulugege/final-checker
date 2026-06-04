@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>长期监控管理 · API Key Checker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/admin.css" />
+</head>
+<body>
+<div class="grid-bg" aria-hidden="true"></div>
+
+<!-- Login Screen -->
+<div id="loginScreen" class="login-screen">
+  <div class="login-panel">
+    <div class="login-brand">
+      <span class="brand-mark">▚</span>
+      <h1>长期监控管理</h1>
+      <p class="login-subtitle">API Key Long-Term Monitor</p>
+    </div>
+    <form id="loginForm" class="login-form">
+      <label class="field-label" for="password">管理员密码</label>
+      <input type="password" id="password" class="login-input" placeholder="输入密码" autocomplete="off" />
+      <button type="submit" class="login-btn">登录</button>
+      <p class="login-error" id="loginError"></p>
+    </form>
+  </div>
+</div>
+
+<!-- Main App -->
+<div id="mainApp" class="main-app" hidden>
+  <header class="masthead">
+    <div class="brand">
+      <span class="brand-mark">▚</span>
+      <h1>长期监控</h1>
+      <span class="brand-tag">Long-Term Monitor</span>
+    </div>
+    <div class="header-actions">
+      <a href="/static/index.html" class="nav-link">← 返回主页</a>
+      <button id="logoutBtn" class="logout-btn">登出</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Control Panel -->
+    <aside class="sidebar">
+      <section class="panel panel--filters">
+        <h2 class="panel-title">筛选器</h2>
+
+        <div class="filter-group">
+          <label class="field-label" for="filterPlatform">平台</label>
+          <select id="filterPlatform" class="filter-select">
+            <option value="">全部平台</option>
+            <option value="gemini">Gemini</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gcp">GCP</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="field-label" for="filterStatus">状态</label>
+          <select id="filterStatus" class="filter-select">
+            <option value="">全部状态</option>
+            <option value="active">Active</option>
+            <option value="dead">Dead</option>
+            <option value="abandoned">Abandoned</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="field-label" for="filterSearch">搜索</label>
+          <input type="text" id="filterSearch" class="filter-input" placeholder="备注或密钥片段" />
+        </div>
+
+        <button id="applyFilters" class="filter-btn">应用筛选</button>
+        <button id="clearFilters" class="filter-btn-clear">清除</button>
+      </section>
+
+      <section class="panel panel--actions">
+        <h2 class="panel-title">批量操作</h2>
+
+        <button id="selectAll" class="action-btn">全选</button>
+        <button id="deselectAll" class="action-btn">取消全选</button>
+        <button id="batchCheck" class="action-btn action-btn--check">探活选中</button>
+        <button id="batchDelete" class="action-btn action-btn--danger">删除选中</button>
+        <button id="checkAll" class="action-btn action-btn--check">探活全部</button>
+      </section>
+
+      <section class="panel panel--move">
+        <h2 class="panel-title">短期库迁移</h2>
+        <p class="move-hint">从短期检查结果移入长期监控</p>
+
+        <div class="filter-group">
+          <label class="field-label" for="movePlatform">平台</label>
+          <select id="movePlatform" class="filter-select">
+            <option value="gemini">Gemini</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gcp">GCP</option>
+          </select>
+        </div>
+
+        <label class="field-label" for="moveKeys">密钥列表</label>
+        <textarea id="moveKeys" class="move-textarea" placeholder="每行一个密钥"></textarea>
+
+        <label class="field-label" for="moveNotes">备注（可选）</label>
+        <input type="text" id="moveNotes" class="filter-input" placeholder="备注信息" />
+
+        <button id="moveKeysBtn" class="action-btn action-btn--primary">移入监控</button>
+      </section>
+    </aside>
+
+    <!-- Keys Table -->
+    <section class="content">
+      <div class="panel panel--keys">
+        <div class="keys-header">
+          <h2 class="panel-title">密钥列表</h2>
+          <div class="keys-meta">
+            <span class="keys-count"><span id="totalCount">0</span> 个密钥</span>
+            <button id="refreshBtn" class="refresh-btn">⟳ 刷新</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="keys-table">
+            <thead>
+              <tr>
+                <th class="col-checkbox"><input type="checkbox" id="selectAllCheckbox" /></th>
+                <th class="col-id">#</th>
+                <th class="col-platform">平台</th>
+                <th class="col-key">密钥</th>
+                <th class="col-status">状态</th>
+                <th class="col-lastcheck">最后检查</th>
+                <th class="col-error">错误码</th>
+                <th class="col-nextcheck">下次检查</th>
+                <th class="col-notes">备注</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody id="keysBody">
+              <tr class="empty-row"><td colspan="10">正在加载...</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pagination">
+          <button id="prevPage" class="page-btn" disabled>← 上一页</button>
+          <span class="page-info"><span id="currentPage">1</span> / <span id="totalPages">1</span></span>
+          <button id="nextPage" class="page-btn" disabled>下一页 →</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footstrip">
+    <span>长期监控 · 定时探活 · 状态追踪</span>
+  </footer>
+</div>
+
+<script src="/static/admin.js"></script>
+</body>
+</html>

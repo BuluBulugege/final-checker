@@ -10,13 +10,42 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api_long_term import router as long_term_router
 from app.config import settings
 from app.jobs import manager
 from app.models import JobRequest, JobSnapshot
 from app.parsing import parse_credentials
 from app.plugins.registry import all_plugins
+from app.scheduler import start_scheduler, stop_scheduler
 
 app = FastAPI(title="final-checker", description="Pluggable API key checker")
+
+# Mount long-term key management API
+app.include_router(long_term_router)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize background scheduler on application startup."""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("Starting up final-checker application...")
+    # Initialize database
+    from app.db import init_db
+    init_db()
+    # Start background scheduler for long-term key monitoring
+    await start_scheduler()
+    logger.info("Application startup complete")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully stop background scheduler on shutdown."""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("Shutting down final-checker application...")
+    await stop_scheduler()
+    logger.info("Application shutdown complete")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
