@@ -31,6 +31,13 @@ from app.redact import redact
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
+
+def fmt(count: int | None) -> str:
+    """Render a resource count, showing '无权限' instead of a misleading 0 when
+    the listing was denied (count is None)."""
+    return "无权限" if count is None else str(count)
+
+
 # A compact, well-supported set of Vertex regions to sweep. Configurable via
 # settings.gcp.locations; we also try to discover the live list at runtime.
 DEFAULT_LOCATIONS = [
@@ -307,23 +314,28 @@ class GCPPlugin(CheckerPlugin):
             }
             result.remarks.append(f"计费: {'已开启' if enabled else '未开启'}")
 
-        # enabled APIs (needs project number)
+        # enabled APIs (needs project number). Distinguish "0 enabled" from
+        # "no permission to list" — reporting 0 when it's actually 403 is a lie.
         if project_number:
-            apis = await self._list_paginated(
+            estatus, edata, ereason = await self._get_json(
                 ctx,
-                token,
                 f"https://serviceusage.googleapis.com/v1/projects/{project_number}"
-                "/services?filter=state:ENABLED",
-                "services",
+                "/services?filter=state:ENABLED&pageSize=200",
+                token,
             )
-            names = [
-                (s.get("config") or {}).get("name")
-                for s in apis
-                if isinstance(s, dict)
-            ]
-            names = [n for n in names if n]
-            report["enabled_apis"] = names
-            result.remarks.append(f"已启用 API: {len(names)} 个")
+            if estatus == 200 and edata is not None:
+                services = edata.get("services") or []
+                names = [
+                    (s.get("config") or {}).get("name")
+                    for s in services
+                    if isinstance(s, dict)
+                ]
+                names = [n for n in names if n]
+                report["enabled_apis"] = names
+                result.remarks.append(f"已启用 API: {len(names)} 个")
+            else:
+                report["enabled_apis"] = {"error": ereason or f"status {estatus}"}
+                result.remarks.append(f"已启用 API: 无法读取 ({ereason or estatus})")
 
         # what can this SA actually do
         perms_to_test = [
@@ -373,54 +385,43 @@ class GCPPlugin(CheckerPlugin):
 
     async def _scan_databases(self, ctx, token, project, result: KeyResult, report) -> None:
         dbs: dict[str, Any] = {}
+        denied: list[str] = []
 
-        # Cloud SQL
-        sql = await self._list_paginated(
-            ctx, token, f"https://sqladmin.googleapis.com/v1/projects/{project}/instances", "items"
+        async def count(label: str, url: str, items_key: str):
+            """Return a dict with either a count or an access-denied marker, so a
+            403 is never silently reported as '0'."""
+            st, data, reason = await self._get_json(ctx, url, token)
+            if st == 200 and data is not None:
+                items = data.get(items_key) or []
+                return {"count": len(items), "items": items[:20]}
+            denied.append(label)
+            return {"count": None, "error": reason or f"status {st}"}
+
+        sql, alloy, spanner, fs = await asyncio.gather(
+            count("Cloud SQL", f"https://sqladmin.googleapis.com/v1/projects/{project}/instances", "items"),
+            count("AlloyDB", f"https://alloydb.googleapis.com/v1/projects/{project}/locations/-/clusters", "clusters"),
+            count("Spanner", f"https://spanner.googleapis.com/v1/projects/{project}/instances", "instances"),
+            count("Firestore", f"https://firestore.googleapis.com/v1/projects/{project}/databases", "databases"),
         )
-        dbs["cloudsql"] = {
-            "count": len(sql),
-            "instances": [
-                {"name": i.get("name"), "version": i.get("databaseVersion"),
-                 "state": i.get("state"), "region": i.get("region")}
-                for i in sql if isinstance(i, dict)
-            ],
-        }
-
-        # AlloyDB (wildcard location)
-        alloy = await self._list_paginated(
-            ctx, token,
-            f"https://alloydb.googleapis.com/v1/projects/{project}/locations/-/clusters",
-            "clusters",
-        )
-        dbs["alloydb"] = {"count": len(alloy)}
-
-        # Spanner
-        spanner = await self._list_paginated(
-            ctx, token, f"https://spanner.googleapis.com/v1/projects/{project}/instances",
-            "instances",
-        )
-        dbs["spanner"] = {"count": len(spanner)}
-
-        # Firestore (no pagination)
-        status, data, reason = await self._get_json(
-            ctx, f"https://firestore.googleapis.com/v1/projects/{project}/databases", token
-        )
-        fs = (data.get("databases") if status == 200 and data else None) or []
-        dbs["firestore"] = {"count": len(fs)}
-
+        dbs = {"cloudsql": sql, "alloydb": alloy, "spanner": spanner, "firestore": fs}
         report["databases"] = dbs
-        total_db = (
-            dbs["cloudsql"]["count"]
-            + dbs["alloydb"]["count"]
-            + dbs["spanner"]["count"]
-            + dbs["firestore"]["count"]
+
+        def n(d):
+            return d.get("count")
+
+        counts = [n(sql), n(alloy), n(spanner), n(fs)]
+        known = [c for c in counts if c is not None]
+        total_db = sum(known)
+        parts = (
+            f"SQL {fmt(n(sql))}, AlloyDB {fmt(n(alloy))}, "
+            f"Spanner {fmt(n(spanner))}, Firestore {fmt(n(fs))}"
         )
-        result.remarks.append(
-            f"数据库: {total_db} (SQL {dbs['cloudsql']['count']}, "
-            f"AlloyDB {dbs['alloydb']['count']}, Spanner {dbs['spanner']['count']}, "
-            f"Firestore {dbs['firestore']['count']})"
-        )
+        if denied:
+            result.remarks.append(
+                f"数据库: 已知 {total_db} ({parts}) — {len(denied)} 类无权限: {', '.join(denied)}"
+            )
+        else:
+            result.remarks.append(f"数据库: {total_db} ({parts})")
 
     async def _scan_vertex(self, ctx, token, project, result: KeyResult, report, info) -> None:
         cfg = getattr(ctx.settings, "gcp", None)
@@ -494,6 +495,57 @@ class GCPPlugin(CheckerPlugin):
                 per_location[loc] = payload
                 all_models.update(payload["publisher_models"])
 
+        # The publisher-models LIST endpoint frequently 404s even when the models
+        # are fully usable (as the user correctly suspected: "真的如此吗?"). So
+        # when listing found nothing, ACTUALLY CALL a set of known Gemini models
+        # with a 1-token generateContent to discover what really works. This is
+        # the user's spec: "如果没法测，就真正实际调用这些模型".
+        usable_models: list[str] = []
+        probe_region = getattr(cfg, "probe_region", "us-central1")
+        probe_models = list(getattr(cfg, "probe_models", None) or [])
+        if not all_models and probe_models:
+            psem = asyncio.Semaphore(int(getattr(cfg, "region_concurrency", 10) or 10))
+
+            async def probe_model(model: str) -> tuple[str, bool, str | None]:
+                async with psem:
+                    url = (
+                        f"https://{probe_region}-aiplatform.googleapis.com/v1/projects/"
+                        f"{project}/locations/{probe_region}/publishers/google/models/"
+                        f"{model}:generateContent"
+                    )
+                    body = {
+                        "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                        "generationConfig": {"maxOutputTokens": 1},
+                    }
+                    st, data, reason = await self._get_json(
+                        ctx, url, token, method="POST", json=body
+                    )
+                    if st == 200:
+                        return model, True, None
+                    # 404 here means "model not available to this project"; 403 a
+                    # permission gap; 429 means it works but is rate-limited.
+                    if st == 429:
+                        return model, True, "rate-limited (可用但限流)"
+                    return model, False, reason or f"status {st}"
+
+            probe_results = await asyncio.gather(
+                *(probe_model(m) for m in probe_models), return_exceptions=True
+            )
+            probe_detail: dict[str, Any] = {}
+            for item in probe_results:
+                if isinstance(item, Exception):
+                    continue
+                model, ok, note = item
+                probe_detail[model] = {"usable": ok, "note": note}
+                if ok:
+                    usable_models.append(model)
+            report["vertex_model_probe"] = {
+                "region": probe_region,
+                "probed": probe_models,
+                "usable": usable_models,
+                "detail": probe_detail,
+            }
+
         # Quota / RPM-TPM (best effort via Cloud Quotas API, needs project number).
         # The project scan runs concurrently, so fetch the number ourselves if it
         # isn't in the report yet.
@@ -530,15 +582,29 @@ class GCPPlugin(CheckerPlugin):
             "locations_with_models": reachable,
             "distinct_models": sorted(all_models),
             "by_location": per_location,
+            "usable_models_probed": usable_models,
             "quota_metrics": quota_info,
         }
-        result.remarks.append(
-            f"Vertex: {len(all_models)} 个模型 / {reachable} 个可用区域"
-        )
+        # Honest remark: separate "listed" from "actually-callable" and never
+        # claim a flat 0 when the truth is "list unavailable".
+        if all_models:
+            result.remarks.append(
+                f"Vertex: {len(all_models)} 个模型 (列表) / {reachable} 个区域"
+            )
+        elif usable_models:
+            result.remarks.append(
+                f"Vertex: 列表不可用，实测 {len(usable_models)} 个模型可调用 "
+                f"({', '.join(usable_models)})"
+            )
+        else:
+            result.remarks.append(
+                "Vertex: 列表端点 404 且已知模型均不可调用 "
+                "(可能 aiplatform API 未启用或无 predict 权限)"
+            )
         if quota_info:
             result.remarks.append(f"配额指标: {len(quota_info)} 项 (见报告)")
         else:
-            result.remarks.append("配额: 无法读取 (报告含模型清单)")
+            result.remarks.append("配额: 无法读取 (需 cloudquotas 权限)")
 
     # ------------------------------------------------------------------ #
     async def _list_paginated(

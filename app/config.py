@@ -89,6 +89,22 @@ class GCPConfig(BaseModel):
     max_locations: int = 8
     # How many region scans run concurrently.
     region_concurrency: int = 20
+    # When the publisher-models LIST endpoint is unavailable (it often 404s even
+    # though models work), actually probe these known Gemini models with a tiny
+    # generateContent call to find which the project can really use.
+    probe_models: list[str] = Field(
+        default_factory=lambda: [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+        ]
+    )
+    # Region to use for the actual generateContent model probes.
+    probe_region: str = "us-central1"
 
 
 class Settings(BaseSettings):
