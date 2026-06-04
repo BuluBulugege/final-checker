@@ -99,7 +99,10 @@ body {
   box-shadow: var(--shadow-lg);
   padding: 1.3rem;
 }
-.panel--input { position: sticky; top: 1.6rem; }
+.panel--input { align-self: start; position: sticky; top: 1.6rem; z-index: 1; }
+@media (max-width: 940px) {
+  .panel--input { position: static; }
+}
 
 /* ---------------- form ---------------- */
 .field-label {
@@ -249,10 +252,19 @@ input[type="range"]::-moz-range-thumb {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   margin-bottom: 0.9rem;
 }
 .results-head h2 { font-size: 1.25rem; font-weight: 800; }
-.job-meta { font-family: "JetBrains Mono", monospace; font-size: 0.74rem; font-weight: 700; opacity: 0.75; }
+.job-meta {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.74rem;
+  font-weight: 700;
+  opacity: 0.75;
+  word-break: break-all;
+  text-align: right;
+}
 
 .overall-bar {
   position: relative;
@@ -280,7 +292,11 @@ input[type="range"]::-moz-range-thumb {
   color: #fff;
 }
 
-.table-wrap { overflow-x: auto; border: var(--border); }
+.table-wrap {
+  overflow: auto;
+  max-height: calc(100vh - 220px);
+  border: var(--border);
+}
 .results-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
 .results-table th {
   background: var(--ink);
@@ -294,6 +310,7 @@ input[type="range"]::-moz-range-thumb {
   white-space: nowrap;
   position: sticky;
   top: 0;
+  z-index: 2;
 }
 .results-table td {
   padding: 0.55rem 0.7rem;
