@@ -79,39 +79,34 @@ class AnthropicConfig(BaseModel):
 class GCPConfig(BaseModel):
     request_timeout_s: float = 30.0
     # Per-request cap so unreachable region endpoints fail fast.
-    probe_timeout_s: float = 8.0
+    probe_timeout_s: float = 15.0
     # Vertex regions to sweep when the live locations list can't be fetched.
     # Empty -> the plugin falls back to its built-in DEFAULT_LOCATIONS.
     locations: list[str] = Field(default_factory=list)
-    # Cap how many regions to actually probe. The live locations endpoint can
-    # return ~48 regions, most empty for a given project; publisher models are
-    # the same across regions, so a handful covers the model list. 0 = no cap.
-    max_locations: int = 8
+    # Cap how many regions to actually enumerate models in. 0 = no cap (all).
+    max_locations: int = 12
     # How many region scans run concurrently.
-    region_concurrency: int = 20
-    # When the publisher-models LIST endpoint is unavailable (it often 404s even
-    # though models work), actually probe these known Gemini models with a tiny
-    # generateContent call to find which the project can really use.
-    probe_models: list[str] = Field(
-        default_factory=lambda: [
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-pro",
-            "gemini-1.5-flash",
-        ]
+    region_concurrency: int = 12
+    # Model Garden publishers to enumerate per region (the real, non-hardcoded
+    # model list comes from v1beta1/publishers/{publisher}/models).
+    publishers: list[str] = Field(
+        default_factory=lambda: ["google", "anthropic", "meta", "mistralai"]
     )
-    # Region to use for the actual generateContent model probes.
+    # Region used for the actual rate/throughput measurements (quota is shared
+    # across regions, so one region's numbers represent the project ceiling).
     probe_region: str = "us-central1"
-    # RPM/TPM measurement (only runs when full_load=True — it makes real calls).
-    # Fire at this rate for this many seconds per model, stopping at first 429.
+    # RPM measurement (full_load only — real calls). Fire small requests fast.
     rpm_probe_rps: float = 50.0
     rpm_probe_seconds: float = 8.0
     rpm_probe_cap: int = 400
-    # Only measure RPM/TPM for this many of the usable models (cheapest first).
-    rpm_probe_max_models: int = 3
+    # TPM measurement (full_load only). Send LARGE inputs so a few requests can
+    # saturate the per-minute token quota; tokens_per_request ~ how big each call.
+    tpm_tokens_per_request: int = 200_000
+    tpm_probe_max_requests: int = 40
+    tpm_probe_concurrency: int = 8
+    # Only measure rate/throughput for this many generative models (cheapest/
+    # most-capable first); enumeration still lists ALL models.
+    rate_probe_max_models: int = 3
 
 
 class Settings(BaseSettings):

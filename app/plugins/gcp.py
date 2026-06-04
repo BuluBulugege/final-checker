@@ -425,9 +425,11 @@ class GCPPlugin(CheckerPlugin):
 
     async def _scan_vertex(self, ctx, token, project, result: KeyResult, report, info) -> None:
         cfg = getattr(ctx.settings, "gcp", None)
-        locations = list(getattr(cfg, "locations", None) or DEFAULT_LOCATIONS)
+        publishers = list(getattr(cfg, "publishers", None) or ["google"])
+        max_loc = int(getattr(cfg, "max_locations", 0) or 0)
 
-        # Try to discover the live location list (best effort).
+        # 1) Determine the regions to enumerate. Prefer the live locations list.
+        locations = list(getattr(cfg, "locations", None) or DEFAULT_LOCATIONS)
         status, data, _ = await self._get_json(
             ctx,
             f"https://aiplatform.googleapis.com/v1/projects/{project}/locations",
@@ -441,143 +443,103 @@ class GCPPlugin(CheckerPlugin):
             ]
             if live:
                 locations = live
-
-        # Cap the number of regions actually probed. The live list can be ~48
-        # regions (mostly empty for one project); publisher models are uniform
-        # across regions, so a handful covers the catalog. Keep the configured
-        # core regions first when capping. 0 = no cap.
-        max_loc = int(getattr(cfg, "max_locations", 0) or 0)
         if max_loc and len(locations) > max_loc:
             core = [loc for loc in DEFAULT_LOCATIONS if loc in locations]
-            ordered = core + [loc for loc in locations if loc not in core]
-            locations = ordered[:max_loc]
+            locations = (core + [x for x in locations if x not in core])[:max_loc]
 
-        per_location: dict[str, Any] = {}
-        all_models: set[str] = set()
-        sem = asyncio.Semaphore(int(getattr(cfg, "region_concurrency", 20) or 20))
+        # 2) Enumerate the REAL model catalogue per region via the working
+        #    v1beta1 publishers/{publisher}/models endpoint. No hardcoded names.
+        sem = asyncio.Semaphore(int(getattr(cfg, "region_concurrency", 12) or 12))
 
-        async def scan_one(loc: str) -> tuple[str, dict[str, Any] | None]:
+        async def list_models(loc: str, publisher: str) -> tuple[str, str, list[str]]:
             async with sem:
-                base = f"https://{loc}-aiplatform.googleapis.com/v1"
-                pub = await self._list_paginated(
-                    ctx,
-                    token,
-                    f"{base}/projects/{project}/locations/{loc}/publishers/google/models",
-                    "models",
-                    page_param="pageSize",
+                names: list[str] = []
+                page = None
+                base = (
+                    f"https://{loc}-aiplatform.googleapis.com/v1beta1/"
+                    f"publishers/{publisher}/models?pageSize=200"
                 )
-                tuned = await self._list_paginated(
-                    ctx,
-                    token,
-                    f"{base}/projects/{project}/locations/{loc}/models",
-                    "models",
-                    page_param="pageSize",
-                )
-            pub_names = [m.get("name", "").split("/")[-1] for m in pub if isinstance(m, dict)]
-            tuned_names = [
-                m.get("displayName") or m.get("name") for m in tuned if isinstance(m, dict)
-            ]
-            if pub_names or tuned_names:
-                return loc, {"publisher_models": pub_names, "tuned_models": tuned_names}
-            return loc, None
+                for _ in range(6):
+                    url = base + (f"&pageToken={page}" if page else "")
+                    st, d, _r = await self._get_json(ctx, url, token)
+                    if st != 200 or not d:
+                        break
+                    for m in d.get("publisherModels", []) or []:
+                        nm = (m.get("name") or "").split("/")[-1]
+                        if nm:
+                            names.append(nm)
+                    page = d.get("nextPageToken")
+                    if not page:
+                        break
+                return loc, publisher, names
 
-        # Scan all regions concurrently (was serial -> very slow with ~12 regions).
-        results = await asyncio.gather(
-            *(scan_one(loc) for loc in locations), return_exceptions=True
-        )
-        reachable = 0
-        for item in results:
-            if isinstance(item, Exception) or item is None:
-                continue
-            loc, payload = item
-            if payload:
-                reachable += 1
-                per_location[loc] = payload
-                all_models.update(payload["publisher_models"])
-
-        # The publisher-models LIST endpoint frequently 404s even when the models
-        # are fully usable (as the user correctly suspected: "真的如此吗?"). So
-        # when listing found nothing, ACTUALLY CALL a set of known Gemini models
-        # with a 1-token generateContent to discover what really works. This is
-        # the user's spec: "如果没法测，就真正实际调用这些模型".
-        usable_models: list[str] = []
-        probe_region = getattr(cfg, "probe_region", "us-central1")
-        probe_models = list(getattr(cfg, "probe_models", None) or [])
-        if not all_models and probe_models:
-            psem = asyncio.Semaphore(int(getattr(cfg, "region_concurrency", 10) or 10))
-
-            async def probe_model(model: str) -> tuple[str, bool, str | None]:
-                async with psem:
-                    url = (
-                        f"https://{probe_region}-aiplatform.googleapis.com/v1/projects/"
-                        f"{project}/locations/{probe_region}/publishers/google/models/"
-                        f"{model}:generateContent"
-                    )
-                    body = {
-                        "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                        "generationConfig": {"maxOutputTokens": 1},
-                    }
-                    st, data, reason = await self._get_json(
-                        ctx, url, token, method="POST", json=body
-                    )
-                    if st == 200:
-                        return model, True, None
-                    # 404 here means "model not available to this project"; 403 a
-                    # permission gap; 429 means it works but is rate-limited.
-                    if st == 429:
-                        return model, True, "rate-limited (可用但限流)"
-                    return model, False, reason or f"status {st}"
-
-            probe_results = await asyncio.gather(
-                *(probe_model(m) for m in probe_models), return_exceptions=True
-            )
-            probe_detail: dict[str, Any] = {}
-            for item in probe_results:
-                if isinstance(item, Exception):
-                    continue
-                model, ok, note = item
-                probe_detail[model] = {"usable": ok, "note": note}
-                if ok:
-                    usable_models.append(model)
-            report["vertex_model_probe"] = {
-                "region": probe_region,
-                "probed": probe_models,
-                "usable": usable_models,
-                "detail": probe_detail,
-            }
-
-        # RPM/TPM measurement: Vertex exposes NO rate-limit headers, so the only
-        # way to learn the real per-minute ceilings is to actually push traffic
-        # and watch for the first 429 (the user's spec). Real calls cost money,
-        # so this only runs in full_load mode.
-        model_rates: dict[str, Any] = {}
-        models_to_measure = (usable_models or sorted(all_models))[
-            : int(getattr(cfg, "rpm_probe_max_models", 3) or 3)
+        tasks = [
+            list_models(loc, pub) for loc in locations for pub in publishers
         ]
-        if ctx.full_load and models_to_measure:
-            # Measure each model concurrently (was serial -> 3x slower, and the
-            # serial windows could interfere via the shared connection pool).
-            rate_results = await asyncio.gather(
-                *(
-                    self._measure_model_rate(ctx, token, project, probe_region, m, cfg)
-                    for m in models_to_measure
-                ),
-                return_exceptions=True,
-            )
-            for model, rate in zip(models_to_measure, rate_results):
-                if isinstance(rate, Exception):
-                    continue
-                model_rates[model] = rate
-                result.remarks.append(
-                    f"{model}: 实测 RPM {rate['rpm_label']} · TPM {rate['tpm_label']}"
-                )
-            report["vertex_rate_measurements"] = model_rates
-        elif models_to_measure:
-            result.remarks.append("RPM/TPM: 未测 (开启「全速压测」才会实际调用测量)")
+        listings = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Quota / RPM-TPM (best effort via Cloud Quotas API, needs project number).
-        # The project scan runs concurrently, so fetch the number ourselves if it
-        # isn't in the report yet.
+        by_location: dict[str, dict[str, list[str]]] = {}
+        all_models: set[str] = set()
+        for item in listings:
+            if isinstance(item, Exception):
+                continue
+            loc, pub, names = item
+            if not names:
+                continue
+            by_location.setdefault(loc, {})[pub] = names
+            all_models.update(names)
+
+        report["vertex"] = {
+            "regions_enumerated": len(locations),
+            "publishers": publishers,
+            "distinct_model_count": len(all_models),
+            "distinct_models": sorted(all_models),
+            "by_location": by_location,
+        }
+        if all_models:
+            result.remarks.append(
+                f"Vertex: {len(all_models)} 个模型 / {len(by_location)} 个区域 "
+                f"({'+'.join(publishers)})"
+            )
+        else:
+            result.remarks.append(
+                "Vertex: 未枚举到模型 (aiplatform API 可能未启用或无访问权限)"
+            )
+
+        # 3) Pick generative Gemini models actually callable, then measure
+        #    RPM (small fast calls) and TPM (large-token calls). full_load only.
+        probe_region = getattr(cfg, "probe_region", "us-central1")
+        gen_candidates = sorted(
+            m for m in all_models
+            if m.startswith("gemini") and "embedding" not in m and "image" not in m
+        )
+        max_models = int(getattr(cfg, "rate_probe_max_models", 3) or 3)
+
+        if ctx.full_load and gen_candidates:
+            # verify callability first (cheap), keep the ones that answer
+            callable_models = await self._filter_callable(
+                ctx, token, project, probe_region, gen_candidates
+            )
+            measure = callable_models[:max_models]
+            rate_report: dict[str, Any] = {}
+            for model in measure:
+                rpm = await self._measure_rpm(ctx, token, project, probe_region, model, cfg)
+                tpm = await self._measure_tpm(ctx, token, project, probe_region, model, cfg)
+                rate_report[model] = {"rpm": rpm, "tpm": tpm}
+                result.remarks.append(
+                    f"{model}: RPM {rpm['label']} · TPM {tpm['label']}"
+                )
+            report["vertex_rate_measurements"] = {
+                "region": probe_region,
+                "note": "配额跨地区共享，单区测量即代表项目上限",
+                "models": rate_report,
+            }
+        elif gen_candidates:
+            result.remarks.append(
+                "RPM/TPM: 未测 (开启「全速压测」才会实际调用测量)"
+            )
+
+        # 4) Cloud Quotas (best effort) for documented limits.
         project_number = (report.get("project") or {}).get("projectNumber")
         if not project_number:
             pstatus, pdata, _ = await self._get_json(
@@ -605,50 +567,40 @@ class GCPPlugin(CheckerPlugin):
                     quota_info.append(
                         {"metric": metric, "displayName": q.get("displayName"), "limit": dims}
                     )
-
-        report["vertex"] = {
-            "locations_scanned": len(locations),
-            "locations_with_models": reachable,
-            "distinct_models": sorted(all_models),
-            "by_location": per_location,
-            "usable_models_probed": usable_models,
-            "quota_metrics": quota_info,
-        }
-        # Honest remark: separate "listed" from "actually-callable" and never
-        # claim a flat 0 when the truth is "list unavailable".
-        if all_models:
-            result.remarks.append(
-                f"Vertex: {len(all_models)} 个模型 (列表) / {reachable} 个区域"
-            )
-        elif usable_models:
-            result.remarks.append(
-                f"Vertex: 列表不可用，实测 {len(usable_models)} 个模型可调用 "
-                f"({', '.join(usable_models)})"
-            )
-        else:
-            result.remarks.append(
-                "Vertex: 列表端点 404 且已知模型均不可调用 "
-                "(可能 aiplatform API 未启用或无 predict 权限)"
-            )
         if quota_info:
+            report["vertex"]["quota_metrics"] = quota_info
             result.remarks.append(f"配额指标: {len(quota_info)} 项 (见报告)")
-        else:
-            result.remarks.append("配额: 无法读取 (需 cloudquotas 权限)")
+
+    async def _filter_callable(
+        self, ctx, token, project, region, models
+    ) -> list[str]:
+        """Return models that answer generateContent (200) or are rate-limited
+        (429 => exists & usable). 404 => not available to this project."""
+        async def chk(model: str) -> tuple[str, bool]:
+            url = (
+                f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
+                f"/locations/{region}/publishers/google/models/{model}:generateContent"
+            )
+            body = {
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {"maxOutputTokens": 1},
+            }
+            st, _d, _r = await self._get_json(ctx, url, token, method="POST", json=body)
+            return model, st in (200, 429)
+
+        res = await asyncio.gather(*(chk(m) for m in models), return_exceptions=True)
+        return [m for item in res if not isinstance(item, Exception) for m, ok in [item] if ok]
 
     # ------------------------------------------------------------------ #
-    async def _measure_model_rate(
-        self, ctx, token, project, region, model, cfg
-    ) -> dict[str, Any]:
-        """Empirically measure a Vertex model's RPM/TPM by pushing real traffic
-        until the first 429 (Vertex exposes no rate-limit headers). Accumulates
-        usageMetadata.totalTokenCount from successes to derive TPM. Returns a
-        dict with raw counts, the derived per-minute figures, and labels that
-        say '≥X' when the limit was never hit within the window."""
+    async def _measure_rpm(self, ctx, token, project, region, model, cfg) -> dict[str, Any]:
+        """Empirical RPM: fire small generateContent calls fast until the first
+        429 (Vertex has no rate headers). Quota is shared across regions, so one
+        region's number is the project ceiling. '≥X' when no 429 was hit."""
         import time
 
-        rps = float(getattr(cfg, "rpm_probe_rps", 20.0))
-        seconds = float(getattr(cfg, "rpm_probe_seconds", 10.0))
-        cap = int(getattr(cfg, "rpm_probe_cap", 200))
+        rps = float(getattr(cfg, "rpm_probe_rps", 50.0))
+        seconds = float(getattr(cfg, "rpm_probe_seconds", 8.0))
+        cap = int(getattr(cfg, "rpm_probe_cap", 400))
         url = (
             f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
             f"/locations/{region}/publishers/google/models/{model}:generateContent"
@@ -658,50 +610,39 @@ class GCPPlugin(CheckerPlugin):
             "generationConfig": {"maxOutputTokens": 1},
         }
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-        success = 0
-        rate_limited = 0
-        other = 0
-        tokens = 0
-        first_429_at: float | None = None
+        success = rate_limited = other = 0
+        first_429: float | None = None
         stop = asyncio.Event()
         start = time.monotonic()
         interval = 1.0 / rps if rps > 0 else 0.0
         tasks: list[asyncio.Task] = []
 
         async def one() -> None:
-            nonlocal success, rate_limited, other, tokens, first_429_at
-            resp, _elapsed, exc = await timed_request(
+            nonlocal success, rate_limited, other, first_429
+            resp, _e, exc = await timed_request(
                 ctx.client, "POST", url, headers=headers, json=body, timeout=20.0
             )
             now = time.monotonic()
             if exc is not None or resp is None:
                 other += 1
-                return
-            if resp.status_code == 200:
+            elif resp.status_code == 200:
                 success += 1
-                try:
-                    tokens += (resp.json().get("usageMetadata") or {}).get("totalTokenCount", 0)
-                except ValueError:
-                    pass
             elif resp.status_code == 429:
                 rate_limited += 1
-                if first_429_at is None or now - start < first_429_at:
-                    first_429_at = now - start
+                if first_429 is None:
+                    first_429 = now - start
                 stop.set()
             else:
                 other += 1
 
         n = 0
         while True:
-            elapsed = time.monotonic() - start
-            if elapsed >= seconds or n >= cap or stop.is_set():
+            if time.monotonic() - start >= seconds or n >= cap or stop.is_set():
                 break
             tasks.append(asyncio.create_task(one()))
             n += 1
             if interval > 0:
-                nxt = start + n * interval
-                wait = nxt - time.monotonic()
+                wait = (start + n * interval) - time.monotonic()
                 if wait > 0:
                     try:
                         await asyncio.wait_for(stop.wait(), timeout=wait)
@@ -709,30 +650,92 @@ class GCPPlugin(CheckerPlugin):
                         pass
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        window = time.monotonic() - start
-
-        # Derive per-minute figures. If we hit a 429, the successes before it are
-        # the empirical ceiling; otherwise we only know the rate is AT LEAST what
-        # we achieved in the window.
-        hit_limit = rate_limited > 0
-        if window > 0:
-            rpm = round(success / window * 60.0)
-            tpm = round(tokens / window * 60.0)
-        else:
-            rpm = success
-            tpm = tokens
+        window = max(time.monotonic() - start, 1e-6)
+        hit = rate_limited > 0
+        rpm = round(success / window * 60.0)
         return {
             "success": success,
             "rate_limited": rate_limited,
             "errors": other,
-            "tokens_total": tokens,
             "window_s": round(window, 2),
-            "first_429_at_s": round(first_429_at, 2) if first_429_at is not None else None,
+            "first_429_at_s": round(first_429, 2) if first_429 is not None else None,
             "rpm": rpm,
+            "hit_limit": hit,
+            "label": f"{rpm}" if hit else f"≥{rpm}",
+        }
+
+    async def _measure_tpm(self, ctx, token, project, region, model, cfg) -> dict[str, Any]:
+        """Empirical TPM: send LARGE inputs (~tpm_tokens_per_request tokens each)
+        and accumulate usageMetadata.totalTokenCount until a 429 (token-per-minute
+        quota saturated) or a request cap. The big-token approach is what makes a
+        few calls able to hit the TPM ceiling. '≥X' when no 429 was hit."""
+        import time
+
+        per_req = int(getattr(cfg, "tpm_tokens_per_request", 200_000))
+        max_req = int(getattr(cfg, "tpm_probe_max_requests", 40))
+        conc = int(getattr(cfg, "tpm_probe_concurrency", 8))
+        # ~1 token per "word " chunk; build once and reuse.
+        big_text = "word " * per_req
+        url = (
+            f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
+            f"/locations/{region}/publishers/google/models/{model}:generateContent"
+        )
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": big_text}]}],
+            "generationConfig": {"maxOutputTokens": 1},
+        }
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        tokens = 0
+        success = rate_limited = other = 0
+        first_429: float | None = None
+        stop = asyncio.Event()
+        sem = asyncio.Semaphore(max(1, conc))
+        start = time.monotonic()
+
+        async def one() -> None:
+            nonlocal tokens, success, rate_limited, other, first_429
+            if stop.is_set():
+                return
+            async with sem:
+                if stop.is_set():
+                    return
+                resp, _e, exc = await timed_request(
+                    ctx.client, "POST", url, headers=headers, json=body, timeout=60.0
+                )
+                now = time.monotonic()
+                if exc is not None or resp is None:
+                    other += 1
+                elif resp.status_code == 200:
+                    success += 1
+                    try:
+                        tokens += (resp.json().get("usageMetadata") or {}).get(
+                            "totalTokenCount", 0
+                        )
+                    except ValueError:
+                        pass
+                elif resp.status_code == 429:
+                    rate_limited += 1
+                    if first_429 is None:
+                        first_429 = now - start
+                    stop.set()
+                else:
+                    other += 1
+
+        await asyncio.gather(*(one() for _ in range(max_req)), return_exceptions=True)
+        window = max(time.monotonic() - start, 1e-6)
+        hit = rate_limited > 0
+        tpm = round(tokens / window * 60.0)
+        return {
+            "requests_ok": success,
+            "rate_limited": rate_limited,
+            "errors": other,
+            "tokens_total": tokens,
+            "tokens_per_request": per_req,
+            "window_s": round(window, 2),
+            "first_429_at_s": round(first_429, 2) if first_429 is not None else None,
             "tpm": tpm,
-            "hit_limit": hit_limit,
-            "rpm_label": f"{rpm}" if hit_limit else f"≥{rpm}",
-            "tpm_label": f"{tpm}" if hit_limit else f"≥{tpm}",
+            "hit_limit": hit,
+            "label": f"{tpm}" if hit else f"≥{tpm}",
         }
 
     # ------------------------------------------------------------------ #

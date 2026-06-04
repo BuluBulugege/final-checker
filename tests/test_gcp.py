@@ -218,17 +218,21 @@ async def test_gcp_grade_full_scan_builds_report_and_download():
     respx.get(url__startswith="https://firestore.googleapis.com").mock(
         return_value=httpx.Response(200, json={"databases": [{"name": "(default)"}]})
     )
-    # vertex locations + models + quotas
+    # vertex locations + model enumeration (v1beta1 publishers/{pub}/models)
     respx.get(
         f"https://aiplatform.googleapis.com/v1/projects/{project}/locations"
     ).mock(return_value=httpx.Response(200, json={"locations": [{"locationId": "us-central1"}]}))
-    respx.get(url__regex=r"https://us-central1-aiplatform\.googleapis\.com/.*publishers/google/models").mock(
+    respx.get(url__regex=r"https://us-central1-aiplatform\.googleapis\.com/v1beta1/publishers/google/models").mock(
         return_value=httpx.Response(
-            200, json={"models": [{"name": "publishers/google/models/gemini-2.5-pro"}]}
+            200,
+            json={"publisherModels": [
+                {"name": "publishers/google/models/gemini-2.5-pro"},
+                {"name": "publishers/google/models/gemini-2.5-flash"},
+            ]},
         )
     )
-    respx.get(url__regex=r"https://us-central1-aiplatform\.googleapis\.com/.*/locations/us-central1/models").mock(
-        return_value=httpx.Response(200, json={"models": []})
+    respx.get(url__regex=r"https://us-central1-aiplatform\.googleapis\.com/v1beta1/publishers/(anthropic|meta|mistralai)/models").mock(
+        return_value=httpx.Response(200, json={"publisherModels": []})
     )
     respx.get(url__startswith="https://cloudquotas.googleapis.com").mock(
         return_value=httpx.Response(
