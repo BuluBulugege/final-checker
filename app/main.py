@@ -190,6 +190,21 @@ async def index():
     return HTMLResponse(html, headers=_NO_CACHE)
 
 
+@app.get("/admin")
+async def admin():
+    """Serve admin panel for long-term key management."""
+    from fastapi.responses import HTMLResponse
+
+    html = (STATIC_DIR / "admin.html").read_text(encoding="utf-8")
+    for asset in ("admin.css", "admin.js"):
+        try:
+            ver = int((STATIC_DIR / asset).stat().st_mtime)
+        except OSError:
+            ver = 0
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
+    return HTMLResponse(html, headers=_NO_CACHE)
+
+
 @app.middleware("http")
 async def no_cache_static(request, call_next):
     """Local dev tool: never let the browser cache UI assets, so edits to the
@@ -202,3 +217,17 @@ async def no_cache_static(request, call_next):
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/admin")
+async def admin_redirect():
+    """Redirect /admin to /static/admin.html"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/static/admin.html")
+
+
+@app.get("/")
+async def root():
+    """Root endpoint - redirect to main UI"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/static/index.html")
