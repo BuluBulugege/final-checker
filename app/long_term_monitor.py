@@ -77,13 +77,201 @@ class LongTermKeyManager:
 
         return existing["id"] if existing else None
 
+    async def add_key_with_check(
+        self,
+        key_data: str,
+        platform: str,
+        notes: str | None = None,
+        check_health: bool = True,
+    ) -> tuple[int, bool, dict[str, Any] | None]:
+        """Add a new key to long-term monitoring with optional health check.
+
+        Args:
+            key_data: Raw API key or service account JSON
+            platform: Platform identifier (gemini/openai/anthropic/gcp)
+            notes: Optional user notes
+            check_health: If True, only add if key passes health check
+
+        Returns:
+            Tuple of (key_id, is_new, check_result) where:
+            - key_id: Database ID of the key
+            - is_new: True if newly added, False if updated existing
+            - check_result: Health check result dict (if check_health=True)
+
+        Raises:
+            ValueError: If platform is not recognized or key fails health check
+        """
+        valid_platforms = {"gemini", "openai", "anthropic", "gcp"}
+        if platform not in valid_platforms:
+            raise ValueError(
+                f"Invalid platform '{platform}'. Must be one of: {valid_platforms}"
+            )
+
+        # Perform health check first if requested
+        check_result = None
+        if check_health:
+            # Create temporary result to check the key
+            check_result = await self._test_key_health(key_data)
+
+            # Only allow alive keys into long-term monitoring
+            if check_result["status"] != "alive":
+                raise ValueError(
+                    f"Key failed health check: {check_result.get('error_class', 'unknown error')}. "
+                    "Only alive keys can be added to long-term monitoring."
+                )
+
+        key_hash = self.hash_key(key_data)
+
+        # Check for duplicate - if exists, update its status
+        existing_id = self.check_duplicate(key_hash)
+        if existing_id:
+            # Update existing key with new check result if available
+            if check_result:
+                if self.db_path:
+                    with get_connection(self.db_path) as conn:
+                        update_key_status(
+                            conn,
+                            key_id=existing_id,
+                            status="active",
+                            last_check=check_result["checked_at"],
+                            error_code=None,
+                            death_time=None,
+                            retry_count=0,
+                        )
+                else:
+                    with get_connection() as conn:
+                        update_key_status(
+                            conn,
+                            key_id=existing_id,
+                            status="active",
+                            last_check=check_result["checked_at"],
+                            error_code=None,
+                            death_time=None,
+                            retry_count=0,
+                        )
+            return (existing_id, False, check_result)
+
+        # Add new key
+        current_time = time.time()
+        if self.db_path:
+            with get_connection(self.db_path) as conn:
+                key_id = db_add_key(
+                    conn,
+                    key_data=key_data,
+                    key_hash=key_hash,
+                    platform=platform,
+                    created_at=current_time,
+                    notes=notes,
+                )
+                # If we have a check result, update the status
+                if check_result:
+                    update_key_status(
+                        conn,
+                        key_id=key_id,
+                        status="active",
+                        last_check=check_result["checked_at"],
+                        error_code=None,
+                        death_time=None,
+                        retry_count=0,
+                    )
+        else:
+            with get_connection() as conn:
+                key_id = db_add_key(
+                    conn,
+                    key_data=key_data,
+                    key_hash=key_hash,
+                    platform=platform,
+                    created_at=current_time,
+                    notes=notes,
+                )
+                # If we have a check result, update the status
+                if check_result:
+                    update_key_status(
+                        conn,
+                        key_id=key_id,
+                        status="active",
+                        last_check=check_result["checked_at"],
+                        error_code=None,
+                        death_time=None,
+                        retry_count=0,
+                    )
+
+        return (key_id, True, check_result)
+
+    async def _test_key_health(self, key_data: str) -> dict[str, Any]:
+        """Test key health without recording to database.
+
+        Returns:
+            Dict with status: "alive" or "dead" and error details
+        """
+        plugin = dispatch(key_data)
+        if not plugin:
+            return {
+                "status": "dead",
+                "error_class": "unsupported",
+                "error_detail": "No plugin matched this key",
+                "response_time_ms": None,
+                "checked_at": time.time(),
+            }
+
+        result = KeyResult(
+            index=0,
+            masked_key=mask_key(key_data),
+            mode=CheckMode.HEALTH,
+        )
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+
+            async def noop_progress(frac: float, label: str | None) -> None:
+                pass
+
+            ctx = CheckContext(
+                client=client,
+                settings=settings,
+                mode=CheckMode.HEALTH,
+                full_load=False,
+                progress=noop_progress,
+            )
+
+            try:
+                await plugin.check(key_data, result, ctx)
+            except Exception as e:
+                result.status = KeyStatus.ERROR
+                result.error = str(e)
+
+        # Convert result to dict
+        status = "alive" if result.status == KeyStatus.SUCCESS else "dead"
+
+        # Extract error class from result.error if available
+        error_class = None
+        if result.error:
+            # Try to extract error class from error message
+            if "auth" in result.error.lower() or "401" in result.error:
+                error_class = "auth"
+            elif "rate" in result.error.lower() or "429" in result.error:
+                error_class = "rate_limit"
+            elif "billing" in result.error.lower() or "quota" in result.error.lower():
+                error_class = "billing"
+            else:
+                error_class = "unknown"
+
+        return {
+            "status": status,
+            "error_class": error_class,
+            "error_detail": result.error,
+            "response_time_ms": result.details.get("response_time_ms") if result.details else None,
+            "checked_at": time.time(),
+        }
+
     def add_key(
         self,
         key_data: str,
         platform: str,
         notes: str | None = None,
     ) -> tuple[int, bool]:
-        """Add a new key to long-term monitoring.
+        """Add a new key to long-term monitoring WITHOUT health check.
+
+        ⚠️  DEPRECATED: Use add_key_with_check() instead to ensure only alive keys are added.
 
         Args:
             key_data: Raw API key or service account JSON

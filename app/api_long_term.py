@@ -218,6 +218,9 @@ async def admin_auth(req: AuthRequest) -> AuthResponse:
 async def add_keys(req: AddKeysRequest) -> AddKeysResponse:
     """Add one or more keys to long-term monitoring (batch).
 
+    Keys are health-checked before adding. Only alive keys are accepted.
+    If a key already exists, its status is updated to the latest check result.
+
     Requires admin authentication.
 
     Args:
@@ -227,30 +230,47 @@ async def add_keys(req: AddKeysRequest) -> AddKeysResponse:
         Summary of added and duplicate keys
 
     Raises:
-        HTTPException: If platform is invalid
+        HTTPException: If platform is invalid or key fails health check
     """
     manager = LongTermKeyManager()
 
     added = 0
-    duplicates = 0
+    updated = 0
+    failed = 0
     key_ids = []
+    errors = []
 
-    for key_data in req.keys:
+    for key_data_item in req.keys:
         try:
-            key_id, is_new = manager.add_key(
-                key_data=key_data.strip(),
+            key_id, is_new, check_result = await manager.add_key_with_check(
+                key_data=key_data_item.strip(),
                 platform=req.platform,
                 notes=req.notes,
+                check_health=True,  # Always check health before adding
             )
             if is_new:
                 added += 1
                 key_ids.append(key_id)
             else:
-                duplicates += 1
+                updated += 1
+                key_ids.append(key_id)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            # Key failed health check or invalid platform
+            failed += 1
+            errors.append(str(e))
 
-    return AddKeysResponse(added=added, duplicates=duplicates, key_ids=key_ids)
+    # If all keys failed, raise exception
+    if failed > 0 and added == 0 and updated == 0:
+        raise HTTPException(
+            400,
+            f"All {failed} keys failed health check. Errors: {'; '.join(errors[:3])}"
+        )
+
+    return AddKeysResponse(
+        added=added,
+        duplicates=updated,  # Reuse "duplicates" field for updated keys
+        key_ids=key_ids
+    )
 
 
 @router.get("/keys", response_model=ListKeysResponse)
