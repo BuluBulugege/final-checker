@@ -1,10 +1,15 @@
 """API routes for long-term key management.
 
 Admin-protected endpoints for managing API keys in long-term monitoring storage.
+
+Security:
+- ADMIN_PASSWORD: Set via environment variable (default: "change-me-in-production")
+- JWT_SECRET: Set via environment variable for token signing
 """
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -17,11 +22,11 @@ from app.long_term_monitor import LongTermKeyManager
 
 router = APIRouter(prefix="/api/long-term", tags=["long-term"])
 
-# Admin password (in production, use environment variable)
-ADMIN_PASSWORD = "bingxujingAb"
+# Admin password (configure via ADMIN_PASSWORD environment variable)
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me-in-production")
 
-# JWT configuration (in production, use environment variable for secret)
-JWT_SECRET = "final-checker-long-term-secret-key-change-in-production"
+# JWT configuration (configure via JWT_SECRET environment variable)
+JWT_SECRET = os.getenv("JWT_SECRET", "final-checker-jwt-secret-change-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_SECONDS = 24 * 3600  # 24 hours
 

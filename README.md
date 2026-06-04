@@ -111,3 +111,68 @@ app/
 ```bash
 uv run pytest -q     # 全程 mock 网络（respx），不打真实 API
 ```
+
+## 长期监控系统 🆕
+
+**自动健康检查**：将测试通过的密钥添加到长期监控，系统每 10 分钟自动探活一次。
+
+### 特性
+
+- ✅ **智能添加**：只允许 alive 的密钥加入监控（添加时自动健康检查）
+- ✅ **自动探活**：后台调度器每 10 分钟检查一次所有密钥
+- ✅ **死亡重试**：密钥失败后会在 24h、36h、48h 自动重试，仍失败则标记为 abandoned
+- ✅ **去重机制**：SHA256 hash 防止重复，重复密钥会更新状态
+- ✅ **管理界面**：Neo-Brutalism 风格的 Web 管理面板
+- ✅ **筛选搜索**：按平台、状态、关键词筛选密钥
+
+### 快速开始
+
+1. **配置密码**（可选）：
+```bash
+cp .env.example .env
+# 编辑 .env 设置 ADMIN_PASSWORD 和 JWT_SECRET
+```
+
+2. **访问管理界面**：
+```
+http://127.0.0.1:8000/admin
+```
+
+3. **添加密钥到长期监控**：
+   - 从短期测试结果批量/选择移入
+   - 或通过 API 直接添加（会先健康检查）
+
+### API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/long-term/auth` | 管理员登录（返回 JWT token） |
+| `GET`  | `/api/long-term/keys` | 列出密钥（支持筛选、分页） |
+| `POST` | `/api/long-term/keys` | 添加密钥（自动健康检查） |
+| `POST` | `/api/long-term/keys/move` | 从短期结果移入 |
+| `POST` | `/api/long-term/keys/{id}/check` | 手动探活单个密钥 |
+| `DELETE` | `/api/long-term/keys/{id}` | 删除密钥 |
+| `POST` | `/api/long-term/check-duplicate` | 检查密钥是否重复 |
+
+### 环境变量
+
+```bash
+ADMIN_PASSWORD=your-secure-password     # 管理员密码（默认: change-me-in-production）
+JWT_SECRET=your-jwt-secret              # JWT 签名密钥
+DB_PATH=./data.db                       # 数据库路径（可选）
+```
+
+### 死亡重试策略
+
+1. 密钥首次失败 → 标记为 `dead`，记录死亡时间
+2. 死亡后 **24 小时** → 第 1 次重试
+3. 死亡后 **36 小时** → 第 2 次重试
+4. 死亡后 **48 小时** → 第 3 次重试
+5. 仍失败 → 标记为 `abandoned`，停止监控
+
+### 安全说明
+
+- 管理界面需要 JWT 认证
+- 密钥数据加密存储（SHA256 hash）
+- 默认密码 **必须** 在生产环境修改
+- 建议使用 HTTPS + 反向代理部署
