@@ -25,6 +25,21 @@ from app.plugins.base import CheckContext, mask_key, redact
 from app.plugins.registry import dispatch
 
 
+def _unsupported_reason(raw_key: str) -> str:
+    """Give a precise reason when no plugin claimed a credential, instead of the
+    opaque 'no plugin matched'. For JSON-ish input we say why it didn't parse."""
+    k = raw_key.strip()
+    if k.startswith("{"):
+        import json
+
+        try:
+            json.loads(k)
+            return "JSON 已解析，但不是 service_account 凭证（缺 type/private_key/client_email）"
+        except ValueError as exc:
+            return redact(f"看起来是 JSON，但解析失败：{exc}") or "JSON 解析失败"
+    return "无法识别的密钥格式（不是 Gemini/OpenAI/Anthropic key，也不是 GCP service-account JSON）"
+
+
 class Job:
     def __init__(self, req: JobRequest, keys: list[str]) -> None:
         self.id = secrets.token_urlsafe(9)
@@ -119,7 +134,7 @@ class Job:
         plugin = dispatch(raw_key)
         if plugin is None:
             result.status = KeyStatus.UNSUPPORTED
-            result.error = "no plugin matched this key format"
+            result.error = _unsupported_reason(raw_key)
             self.completed += 1
             self._emit_result(result)
             self._emit_job()

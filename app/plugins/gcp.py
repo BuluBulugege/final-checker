@@ -57,35 +57,68 @@ class GCPPlugin(CheckerPlugin):
     # ------------------------------------------------------------------ #
     @staticmethod
     def _normalize(key: str) -> str:
-        """Strip BOM/zero-width junk and normalize smart quotes so a pasted key
-        with editor artifacts still parses as JSON."""
-        k = key.strip().lstrip("﻿").replace("​", "")
-        # smart double quotes -> straight (single quotes aren't valid JSON anyway)
-        k = k.replace("“", '"').replace("”", '"')
-        return k
+        """Aggressively clean a pasted key of editor/clipboard artifacts so it
+        parses as JSON: strip BOM and zero-width chars, map every smart-quote
+        variant to straight quotes, and turn non-breaking spaces into spaces."""
+        k = key.strip()
+        # BOM + zero-width + word-joiner + nbsp variants
+        for junk in ("﻿", "​", "‌", "‍", "⁠"):
+            k = k.replace(junk, "")
+        k = k.replace(" ", " ").replace(" ", " ")
+        # smart / typographic double quotes -> straight ASCII quote
+        for q in ("“", "”", "„", "‟", "″", "〃", "＂"):
+            k = k.replace(q, '"')
+        return k.strip()
 
     def matches(self, key: str) -> bool:
-        """A GCP key is a JSON object with type=service_account and the tell-tale
-        service-account fields. Cheap structural check, no network."""
+        """Claim anything that structurally looks like a GCP service-account key.
+
+        Detection is intentionally LENIENT: we route a service-account-shaped
+        JSON block to this plugin even if it has a minor JSON flaw, so the user
+        gets a precise error from the parse/token step instead of a useless
+        'no plugin matched'. The strict parse happens later in _load_info.
+        """
         k = self._normalize(key)
         if not (k.startswith("{") and k.endswith("}")):
             return False
+        # Fast path: valid JSON with the right type.
         try:
             obj = json.loads(k)
+            if isinstance(obj, dict):
+                if obj.get("type") == "service_account":
+                    return True
+                # tolerate keys that omit "type" but clearly are SA keys
+                if obj.get("private_key") and obj.get("client_email"):
+                    return True
+                return False
         except (ValueError, TypeError):
-            return False
-        if not isinstance(obj, dict):
-            return False
-        if obj.get("type") != "service_account":
-            return False
-        return bool(obj.get("private_key") and obj.get("client_email"))
+            pass
+        # Fallback: structural sniff for a service-account block that didn't
+        # cleanly parse (stray char, trailing comma, etc.). All three markers
+        # present => it's a GCP key with a defect, claim it and report the flaw.
+        low = k
+        return (
+            '"service_account"' in low
+            and '"private_key"' in low
+            and '"client_email"' in low
+        )
 
     # ------------------------------------------------------------------ #
     # helpers
     # ------------------------------------------------------------------ #
     @staticmethod
     def _load_info(key: str) -> dict[str, Any]:
-        return json.loads(GCPPlugin._normalize(key))
+        """Tolerant parse: normalize artifacts, then try strict JSON; on failure
+        strip a trailing comma before the closing brace (a common paste defect)
+        and retry once."""
+        k = GCPPlugin._normalize(key)
+        try:
+            return json.loads(k)
+        except ValueError:
+            import re
+
+            repaired = re.sub(r",(\s*[}\]])", r"\1", k)  # drop trailing commas
+            return json.loads(repaired)
 
     async def _mint_token(
         self, info: dict[str, Any], ctx: CheckContext
