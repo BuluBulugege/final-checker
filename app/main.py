@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -145,8 +145,20 @@ _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
 
 
 @app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
+async def index():
+    """Serve index.html with cache-busting version stamps on the JS/CSS URLs
+    (derived from file mtime), so a browser can never run a stale bundle —
+    the #1 cause of 'no plugin matched' after a UI change."""
+    from fastapi.responses import HTMLResponse
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.css", "app.js"):
+        try:
+            ver = int((STATIC_DIR / asset).stat().st_mtime)
+        except OSError:
+            ver = 0
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
+    return HTMLResponse(html, headers=_NO_CACHE)
 
 
 @app.middleware("http")
