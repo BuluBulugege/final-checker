@@ -141,9 +141,22 @@ def _sse(event: str, data: dict) -> str:
 
 
 # --- static UI -------------------------------------------------------------
+_NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
+
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
+
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """Local dev tool: never let the browser cache UI assets, so edits to the
+    JS/CSS show up on a plain refresh instead of serving a stale bundle."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
 
 
 if STATIC_DIR.exists():

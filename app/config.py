@@ -78,9 +78,17 @@ class AnthropicConfig(BaseModel):
 
 class GCPConfig(BaseModel):
     request_timeout_s: float = 30.0
+    # Per-request cap so unreachable region endpoints fail fast.
+    probe_timeout_s: float = 8.0
     # Vertex regions to sweep when the live locations list can't be fetched.
     # Empty -> the plugin falls back to its built-in DEFAULT_LOCATIONS.
     locations: list[str] = Field(default_factory=list)
+    # Cap how many regions to actually probe. The live locations endpoint can
+    # return ~48 regions, most empty for a given project; publisher models are
+    # the same across regions, so a handful covers the model list. 0 = no cap.
+    max_locations: int = 8
+    # How many region scans run concurrently.
+    region_concurrency: int = 20
 
 
 class Settings(BaseSettings):

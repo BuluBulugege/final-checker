@@ -19,6 +19,7 @@ and reach one API.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -129,6 +130,10 @@ class GCPPlugin(CheckerPlugin):
         headers = {"Authorization": f"Bearer {token}"}
         if "json" in kw:
             headers["Content-Type"] = "application/json"
+        # Cap per-request time so unreachable regions/disabled APIs fail fast
+        # instead of dragging the whole scan to a multi-minute crawl.
+        timeout = getattr(getattr(ctx.settings, "gcp", None), "probe_timeout_s", 8.0)
+        kw.setdefault("timeout", timeout)
         resp, _elapsed, exc = await timed_request(ctx.client, method, url, headers=headers, **kw)
         if exc is not None or resp is None:
             return None, None, "network"
@@ -203,21 +208,17 @@ class GCPPlugin(CheckerPlugin):
             "client_email": info.get("client_email"),
         }
 
-        # 1) project overview ------------------------------------------------
-        await ctx.progress(0.15, "项目概览…")
-        await self._scan_project(ctx, token, project, result, report)
-
-        # 2) compute instances ----------------------------------------------
-        await ctx.progress(0.35, "扫描服务器…")
-        await self._scan_compute(ctx, token, project, result, report)
-
-        # 3) databases -------------------------------------------------------
-        await ctx.progress(0.55, "清点数据库…")
-        await self._scan_databases(ctx, token, project, result, report)
-
-        # 4) vertex models ---------------------------------------------------
-        await ctx.progress(0.75, "探查 Vertex 模型…")
-        await self._scan_vertex(ctx, token, project, result, report, info)
+        # Run the four scan areas concurrently — they are independent (vertex
+        # fetches its own project number for the quota call). This turns a
+        # ~16s serial crawl into roughly the slowest single area.
+        await ctx.progress(0.15, "并行扫描中…")
+        await asyncio.gather(
+            self._scan_project(ctx, token, project, result, report),
+            self._scan_compute(ctx, token, project, result, report),
+            self._scan_databases(ctx, token, project, result, report),
+            self._scan_vertex(ctx, token, project, result, report, info),
+            return_exceptions=True,
+        )
 
         # finalize: GCP has no single tier; summarize + attach full report
         result.status = KeyStatus.GRADED
@@ -398,37 +399,71 @@ class GCPPlugin(CheckerPlugin):
             if live:
                 locations = live
 
+        # Cap the number of regions actually probed. The live list can be ~48
+        # regions (mostly empty for one project); publisher models are uniform
+        # across regions, so a handful covers the catalog. Keep the configured
+        # core regions first when capping. 0 = no cap.
+        max_loc = int(getattr(cfg, "max_locations", 0) or 0)
+        if max_loc and len(locations) > max_loc:
+            core = [loc for loc in DEFAULT_LOCATIONS if loc in locations]
+            ordered = core + [loc for loc in locations if loc not in core]
+            locations = ordered[:max_loc]
+
         per_location: dict[str, Any] = {}
         all_models: set[str] = set()
-        reachable = 0
-        for loc in locations:
-            base = f"https://{loc}-aiplatform.googleapis.com/v1"
-            pub = await self._list_paginated(
-                ctx,
-                token,
-                f"{base}/projects/{project}/locations/{loc}/publishers/google/models",
-                "models",
-                page_param="pageSize",
-            )
-            tuned = await self._list_paginated(
-                ctx,
-                token,
-                f"{base}/projects/{project}/locations/{loc}/models",
-                "models",
-                page_param="pageSize",
-            )
-            pub_names = [m.get("name", "").split("/")[-1] for m in pub if isinstance(m, dict)]
-            tuned_names = [m.get("displayName") or m.get("name") for m in tuned if isinstance(m, dict)]
-            if pub_names or tuned_names:
-                reachable += 1
-                per_location[loc] = {
-                    "publisher_models": pub_names,
-                    "tuned_models": tuned_names,
-                }
-                all_models.update(pub_names)
+        sem = asyncio.Semaphore(int(getattr(cfg, "region_concurrency", 20) or 20))
 
-        # Quota / RPM-TPM (best effort via Cloud Quotas API, needs project number)
+        async def scan_one(loc: str) -> tuple[str, dict[str, Any] | None]:
+            async with sem:
+                base = f"https://{loc}-aiplatform.googleapis.com/v1"
+                pub = await self._list_paginated(
+                    ctx,
+                    token,
+                    f"{base}/projects/{project}/locations/{loc}/publishers/google/models",
+                    "models",
+                    page_param="pageSize",
+                )
+                tuned = await self._list_paginated(
+                    ctx,
+                    token,
+                    f"{base}/projects/{project}/locations/{loc}/models",
+                    "models",
+                    page_param="pageSize",
+                )
+            pub_names = [m.get("name", "").split("/")[-1] for m in pub if isinstance(m, dict)]
+            tuned_names = [
+                m.get("displayName") or m.get("name") for m in tuned if isinstance(m, dict)
+            ]
+            if pub_names or tuned_names:
+                return loc, {"publisher_models": pub_names, "tuned_models": tuned_names}
+            return loc, None
+
+        # Scan all regions concurrently (was serial -> very slow with ~12 regions).
+        results = await asyncio.gather(
+            *(scan_one(loc) for loc in locations), return_exceptions=True
+        )
+        reachable = 0
+        for item in results:
+            if isinstance(item, Exception) or item is None:
+                continue
+            loc, payload = item
+            if payload:
+                reachable += 1
+                per_location[loc] = payload
+                all_models.update(payload["publisher_models"])
+
+        # Quota / RPM-TPM (best effort via Cloud Quotas API, needs project number).
+        # The project scan runs concurrently, so fetch the number ourselves if it
+        # isn't in the report yet.
         project_number = (report.get("project") or {}).get("projectNumber")
+        if not project_number:
+            pstatus, pdata, _ = await self._get_json(
+                ctx,
+                f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}",
+                token,
+            )
+            if pstatus == 200 and pdata:
+                project_number = pdata.get("projectNumber")
         quota_info: list[Any] = []
         if project_number:
             quotas = await self._list_paginated(
