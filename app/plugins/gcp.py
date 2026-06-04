@@ -546,6 +546,35 @@ class GCPPlugin(CheckerPlugin):
                 "detail": probe_detail,
             }
 
+        # RPM/TPM measurement: Vertex exposes NO rate-limit headers, so the only
+        # way to learn the real per-minute ceilings is to actually push traffic
+        # and watch for the first 429 (the user's spec). Real calls cost money,
+        # so this only runs in full_load mode.
+        model_rates: dict[str, Any] = {}
+        models_to_measure = (usable_models or sorted(all_models))[
+            : int(getattr(cfg, "rpm_probe_max_models", 3) or 3)
+        ]
+        if ctx.full_load and models_to_measure:
+            # Measure each model concurrently (was serial -> 3x slower, and the
+            # serial windows could interfere via the shared connection pool).
+            rate_results = await asyncio.gather(
+                *(
+                    self._measure_model_rate(ctx, token, project, probe_region, m, cfg)
+                    for m in models_to_measure
+                ),
+                return_exceptions=True,
+            )
+            for model, rate in zip(models_to_measure, rate_results):
+                if isinstance(rate, Exception):
+                    continue
+                model_rates[model] = rate
+                result.remarks.append(
+                    f"{model}: 实测 RPM {rate['rpm_label']} · TPM {rate['tpm_label']}"
+                )
+            report["vertex_rate_measurements"] = model_rates
+        elif models_to_measure:
+            result.remarks.append("RPM/TPM: 未测 (开启「全速压测」才会实际调用测量)")
+
         # Quota / RPM-TPM (best effort via Cloud Quotas API, needs project number).
         # The project scan runs concurrently, so fetch the number ourselves if it
         # isn't in the report yet.
@@ -605,6 +634,106 @@ class GCPPlugin(CheckerPlugin):
             result.remarks.append(f"配额指标: {len(quota_info)} 项 (见报告)")
         else:
             result.remarks.append("配额: 无法读取 (需 cloudquotas 权限)")
+
+    # ------------------------------------------------------------------ #
+    async def _measure_model_rate(
+        self, ctx, token, project, region, model, cfg
+    ) -> dict[str, Any]:
+        """Empirically measure a Vertex model's RPM/TPM by pushing real traffic
+        until the first 429 (Vertex exposes no rate-limit headers). Accumulates
+        usageMetadata.totalTokenCount from successes to derive TPM. Returns a
+        dict with raw counts, the derived per-minute figures, and labels that
+        say '≥X' when the limit was never hit within the window."""
+        import time
+
+        rps = float(getattr(cfg, "rpm_probe_rps", 20.0))
+        seconds = float(getattr(cfg, "rpm_probe_seconds", 10.0))
+        cap = int(getattr(cfg, "rpm_probe_cap", 200))
+        url = (
+            f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
+            f"/locations/{region}/publishers/google/models/{model}:generateContent"
+        )
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {"maxOutputTokens": 1},
+        }
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        success = 0
+        rate_limited = 0
+        other = 0
+        tokens = 0
+        first_429_at: float | None = None
+        stop = asyncio.Event()
+        start = time.monotonic()
+        interval = 1.0 / rps if rps > 0 else 0.0
+        tasks: list[asyncio.Task] = []
+
+        async def one() -> None:
+            nonlocal success, rate_limited, other, tokens, first_429_at
+            resp, _elapsed, exc = await timed_request(
+                ctx.client, "POST", url, headers=headers, json=body, timeout=20.0
+            )
+            now = time.monotonic()
+            if exc is not None or resp is None:
+                other += 1
+                return
+            if resp.status_code == 200:
+                success += 1
+                try:
+                    tokens += (resp.json().get("usageMetadata") or {}).get("totalTokenCount", 0)
+                except ValueError:
+                    pass
+            elif resp.status_code == 429:
+                rate_limited += 1
+                if first_429_at is None or now - start < first_429_at:
+                    first_429_at = now - start
+                stop.set()
+            else:
+                other += 1
+
+        n = 0
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= seconds or n >= cap or stop.is_set():
+                break
+            tasks.append(asyncio.create_task(one()))
+            n += 1
+            if interval > 0:
+                nxt = start + n * interval
+                wait = nxt - time.monotonic()
+                if wait > 0:
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=wait)
+                    except asyncio.TimeoutError:
+                        pass
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        window = time.monotonic() - start
+
+        # Derive per-minute figures. If we hit a 429, the successes before it are
+        # the empirical ceiling; otherwise we only know the rate is AT LEAST what
+        # we achieved in the window.
+        hit_limit = rate_limited > 0
+        if window > 0:
+            rpm = round(success / window * 60.0)
+            tpm = round(tokens / window * 60.0)
+        else:
+            rpm = success
+            tpm = tokens
+        return {
+            "success": success,
+            "rate_limited": rate_limited,
+            "errors": other,
+            "tokens_total": tokens,
+            "window_s": round(window, 2),
+            "first_429_at_s": round(first_429_at, 2) if first_429_at is not None else None,
+            "rpm": rpm,
+            "tpm": tpm,
+            "hit_limit": hit_limit,
+            "rpm_label": f"{rpm}" if hit_limit else f"≥{rpm}",
+            "tpm_label": f"{tpm}" if hit_limit else f"≥{tpm}",
+        }
 
     # ------------------------------------------------------------------ #
     async def _list_paginated(

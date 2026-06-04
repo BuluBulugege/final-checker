@@ -105,6 +105,13 @@ class GCPConfig(BaseModel):
     )
     # Region to use for the actual generateContent model probes.
     probe_region: str = "us-central1"
+    # RPM/TPM measurement (only runs when full_load=True — it makes real calls).
+    # Fire at this rate for this many seconds per model, stopping at first 429.
+    rpm_probe_rps: float = 50.0
+    rpm_probe_seconds: float = 8.0
+    rpm_probe_cap: int = 400
+    # Only measure RPM/TPM for this many of the usable models (cheapest first).
+    rpm_probe_max_models: int = 3
 
 
 class Settings(BaseSettings):
