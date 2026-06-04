@@ -60,6 +60,10 @@ def parse_credentials(raw: str) -> list[str]:
     - Text outside JSON blocks is split by line, one credential per non-empty line.
     Positions are interleaved so the output order matches the input order.
     """
+    # Strip a UTF-8 BOM / zero-width junk that editors and web copies often
+    # prepend; an invisible char before "{" would otherwise hide the JSON block
+    # and the whole key would be split line-by-line ("no plugin matched").
+    raw = raw.replace("﻿", "").replace("​", "")
     blocks = _extract_json_blocks(raw)
     creds: list[tuple[int, str]] = []
 

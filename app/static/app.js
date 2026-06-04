@@ -46,6 +46,8 @@ function countKeys() {
 // Mirror of the server's parse_credentials: each balanced top-level {...} JSON
 // block counts as one credential; remaining non-empty lines count one each.
 function countCredentials(raw) {
+  // strip BOM / zero-width junk so a pasted JSON key still counts as one block
+  raw = raw.replace(/﻿/g, "").replace(/​/g, "");
   let count = 0;
   let i = 0;
   const n = raw.length;

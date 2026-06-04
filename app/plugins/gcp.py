@@ -55,10 +55,19 @@ class GCPPlugin(CheckerPlugin):
     # ------------------------------------------------------------------ #
     # detection
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _normalize(key: str) -> str:
+        """Strip BOM/zero-width junk and normalize smart quotes so a pasted key
+        with editor artifacts still parses as JSON."""
+        k = key.strip().lstrip("﻿").replace("​", "")
+        # smart double quotes -> straight (single quotes aren't valid JSON anyway)
+        k = k.replace("“", '"').replace("”", '"')
+        return k
+
     def matches(self, key: str) -> bool:
         """A GCP key is a JSON object with type=service_account and the tell-tale
         service-account fields. Cheap structural check, no network."""
-        k = key.strip()
+        k = self._normalize(key)
         if not (k.startswith("{") and k.endswith("}")):
             return False
         try:
@@ -76,7 +85,7 @@ class GCPPlugin(CheckerPlugin):
     # ------------------------------------------------------------------ #
     @staticmethod
     def _load_info(key: str) -> dict[str, Any]:
-        return json.loads(key.strip())
+        return json.loads(GCPPlugin._normalize(key))
 
     async def _mint_token(
         self, info: dict[str, Any], ctx: CheckContext

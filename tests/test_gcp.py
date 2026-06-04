@@ -70,6 +70,23 @@ def test_parse_empty():
     assert parse_credentials("   \n\n  ") == []
 
 
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        lambda s: "﻿" + s,  # UTF-8 BOM
+        lambda s: "​" + s,  # zero-width space
+        lambda s: "\n\n   " + s + "  \n",  # blank lines + whitespace
+        lambda s: s.replace('"type"', "“type”"),  # smart quotes
+    ],
+)
+def test_parse_and_detect_survives_paste_artifacts(wrap):
+    raw = wrap(_sa_key("artifact-proj"))
+    creds = parse_credentials(raw)
+    assert len(creds) == 1, f"expected 1 credential, got {len(creds)}"
+    assert PLUGIN.matches(creds[0]), "GCP plugin failed to match after artifact"
+    assert PLUGIN._load_info(creds[0])["project_id"] == "artifact-proj"
+
+
 # --------------------------------------------------------------------------- #
 # detection
 # --------------------------------------------------------------------------- #
