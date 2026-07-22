@@ -1,6 +1,6 @@
 # final-checker · 插拔式 API Key 检查器
 
-一行一个 API key 丢进来，插件自动识别是 **Gemini / OpenAI / Anthropic** 哪一家，
+一行一个 API key 丢进来，插件自动识别是 **Gemini / OpenAI / Anthropic / GCP / Azure / AWS Bedrock** 哪一家，
 自动调用对应检查。两种模式：**测活**（能不能调用）和 **测等级**（探测限额/等级）。
 FastAPI 后端 + Neo-Brutalism Web UI，异步任务、实时进度、可配置并发。
 
@@ -53,7 +53,22 @@ cat keys.txt | uv run final-checker - --mode health
   → 直接标 `企业级`。备注里列出每个模型的 RPM/ITPM/OTPM。
 - Anthropic 没有图像模型，也没有 TPD 响应头（日限是美元额度，不是速率头）。
 
-### GCP（Service Account）
+### Azure（AI Foundry / OpenAI Service）
+- 输入格式 `URL|API_KEY`（解析器自动拼接分行的 URL 和 key）。
+- 支持 `.openai.azure.com`、`.services.ai.azure.com`、`.cognitiveservices.azure.com`。
+- 列出部署 → 列出模型 → 逐个探测（Responses API / chat/completions / 经典部署路径三种方式自动切换）。
+- Foundry 端点自动去掉日期后缀用短名探测，读取 `x-ratelimit-limit-tokens` / `x-ratelimit-limit-requests` 报告 TPM/RPM。
+- 优先检测：gpt-5.x 全系列、Claude 全系列、Grok、DeepSeek、model-router、gpt-image-2。
+
+### AWS Bedrock（IAM 凭证）
+- 输入格式 `AKIA...:SECRET`（解析器自动拼接 `AWS_ACCESS_KEY_ID=` / `AWS_SECRET_ACCESS_KEY=` 环境变量格式）。
+- **纯 Python SigV4 签名**（hmac/hashlib，无 boto3 依赖）。
+- STS GetCallerIdentity 验证身份 → 跨 7+ 区域枚举 Foundation Models → Converse API 逐模型实测。
+- **Claude 深度检测**：所有 Claude 模型逐区域测试（fable-5、opus-4-8、sonnet-5 等），支持 Inference Profile ARN 自动回退。
+- **fable-5 数据共享**：检测到 fable-5 未开启时自动尝试调用 `foundation-model-entitlement` API 请求访问。
+- 报告按 provider 分组，Claude 模型单独列出每个区域的可用性。
+
+
 - 输入是**整块 service-account JSON**（`{"type":"service_account", ...}`）；粘进文本框即可，
   解析器自动把 JSON 块当成一条凭证识别（其余行仍按「每行一个」）。
 - 用私钥离线签 RS256 JWT，向 `oauth2.googleapis.com/token` 换 access token（官方 `google-auth` 签名 + httpx 异步换取，不引入 `requests`）。`invalid_grant` → 密钥失效。
@@ -79,14 +94,25 @@ app/
   plugins/
     base.py        插件契约：matches / health_check / grade_check
     registry.py    自动发现：放一个含 PLUGIN 实例的模块即自动注册
-    gemini.py  openai.py  anthropic.py  gcp.py
-  parsing.py       输入解析：JSON 块（GCP）当一条，其余按行
+    gemini.py  openai.py  anthropic.py  gcp.py  azure.py  aws_bedrock.py
+  parsing.py       输入解析：JSON 块（GCP）当一条，AWS 环境变量对 / Azure URL+key 自动拼接，其余按行
   redact.py        密钥脱敏：从任何错误/详情字符串里抹掉 key 形状的串
   static/          Neo-Brutalism Web UI
 ```
 
-**加一个第四家供应商**：在 `app/plugins/` 放一个新模块，实现 `CheckerPlugin`，
+**加一个新供应商**：在 `app/plugins/` 放一个新模块，实现 `CheckerPlugin`，
 模块末尾写 `PLUGIN = YourPlugin()` 即可，registry 会自动发现并接入路由。
+
+## 支持的凭证格式
+
+| 供应商 | 格式 | 示例 |
+|--------|------|------|
+| Gemini | `AIza...` | 单行 API key |
+| OpenAI | `sk-...` | 单行 API key |
+| Anthropic | `sk-ant-...` | 单行 API key |
+| GCP | `{"type":"service_account",...}` | 整块 JSON |
+| Azure | `URL\|KEY` 或分行粘贴 | 自动拼接 |
+| AWS Bedrock | `AKIA...:SECRET` 或 env var 格式 | 自动拼接 |
 
 ## REST API
 
