@@ -77,6 +77,7 @@ def mask_key(key: str) -> str:
     instead of a meaningless brace fragment, so the row is identifiable.
     """
     key = key.strip()
+    # GCP service-account JSON
     if key.startswith("{"):
         try:
             import json as _json
@@ -87,6 +88,19 @@ def mask_key(key: str) -> str:
                 return f"GCP:{email}"
         except (ValueError, TypeError):
             pass
+    # Azure: URL|KEY format
+    if "|" in key and ("azure.com" in key.lower()):
+        url_part = key.split("|", 1)[0].strip()
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(url_part).hostname or url_part[:30]
+        except Exception:
+            host = url_part[:30]
+        return f"Azure:{host}"
+    # AWS: AKIA...:SECRET format
+    if key.startswith("AKIA") and ":" in key:
+        ak = key.split(":")[0]
+        return f"AWS:{ak}"
     if len(key) <= 12:
         return (key[:4] + "…") if key else "(empty)"
     return f"{key[:8]}…{key[-4:]}"

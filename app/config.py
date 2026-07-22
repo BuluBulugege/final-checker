@@ -76,6 +76,21 @@ class AnthropicConfig(BaseModel):
     )
 
 
+class AzureConfig(BaseModel):
+    api_version: str = "2024-10-21"
+    request_timeout_s: float = 30.0
+
+
+class AWSBedrockConfig(BaseModel):
+    regions: list[str] = Field(default_factory=lambda: [
+        "us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1",
+        "us-east-2", "ap-southeast-1", "eu-central-1",
+    ])
+    request_timeout_s: float = 30.0
+    max_models_per_region: int = 50
+    test_concurrency: int = 8
+
+
 class GCPConfig(BaseModel):
     request_timeout_s: float = 30.0
     # Per-request cap so unreachable region endpoints fail fast.
@@ -126,6 +141,8 @@ class Settings(BaseSettings):
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     gcp: GCPConfig = Field(default_factory=GCPConfig)
+    azure: AzureConfig = Field(default_factory=AzureConfig)
+    aws_bedrock: AWSBedrockConfig = Field(default_factory=AWSBedrockConfig)
 
 
 settings = Settings()
