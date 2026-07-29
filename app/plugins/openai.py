@@ -37,14 +37,24 @@ from app.models import (
     KeyStatus,
     ProbeOutcome,
 )
-from app.plugins.base import CheckContext, CheckerPlugin
+from app.plugins.base import CheckContext, CheckerPlugin, PluginMeta
 from app.ratetest import run_burst
 
 
 class OpenAIPlugin(CheckerPlugin):
     """Checker for OpenAI API keys."""
 
-    name = "openai"
+    # NOTE: priority 90 keeps this plugin LAST in dispatch order. Its matcher
+    # accepts any ``sk-…`` key, so running earlier would swallow Anthropic's
+    # ``sk-ant-…`` keys before the anthropic plugin (priority 10) sees them.
+    meta = PluginMeta(
+        name="openai",
+        version="1.0.0",
+        description="OpenAI API 测活 + TPM/RPM 等级（chat 模型限流头 + 图像突发）",
+        key_format_hint="OpenAI key（sk-…）",
+        capabilities=["health", "grade"],
+        priority=90,
+    )
 
     # ------------------------------------------------------------------ #
     # detection

@@ -77,8 +77,12 @@ class AnthropicConfig(BaseModel):
 
 
 class AzureConfig(BaseModel):
+    # Primary api-version tried first; the plugin then falls back to its
+    # built-in version list (which starts with this same version by default).
     api_version: str = "2024-10-21"
-    request_timeout_s: float = 30.0
+    # Matches the job client's 60s default and the plugin's previous hardcoded
+    # Responses-API timeout, so wiring this in changes no runtime behavior.
+    request_timeout_s: float = 60.0
 
 
 class AWSBedrockConfig(BaseModel):

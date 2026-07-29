@@ -52,7 +52,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 @app.get("/api/plugins")
 async def list_plugins() -> dict:
-    return {"plugins": [p.name for p in all_plugins()]}
+    """Full plugin metadata (name, version, description, key_format_hint,
+    capabilities, priority, enabled), in dispatch order."""
+    return {"plugins": [p.meta.model_dump() for p in all_plugins()]}
 
 
 @app.get("/api/config")
@@ -221,17 +223,3 @@ async def no_cache_static(request, call_next):
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
-@app.get("/admin")
-async def admin_page():
-    """Redirect /admin to admin interface"""
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/static/admin.html", status_code=302)
-
-
-@app.get("/")
-async def root_page():
-    """Root endpoint - redirect to main UI"""
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/static/index.html", status_code=302)

@@ -23,13 +23,16 @@ import asyncio
 import json
 from typing import Any
 
+from app.config import GCPConfig
 from app.http_util import timed_request
 from app.models import ErrorClass, KeyResult, KeyStatus
-from app.plugins.base import CheckContext, CheckerPlugin
+from app.plugins.base import CheckContext, CheckerPlugin, PluginMeta
 from app.redact import redact
 
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+_SA_DOMAIN = ".iam.gserviceaccount.com"
 
 
 def fmt(count: int | None) -> str:
@@ -57,7 +60,20 @@ DEFAULT_LOCATIONS = [
 
 
 class GCPPlugin(CheckerPlugin):
-    name = "gcp"
+    meta = PluginMeta(
+        name="gcp",
+        version="1.0.0",
+        description="GCP service-account 全项目扫描（Vertex/Compute/数据库/配额）",
+        key_format_hint="GCP service-account JSON（{\"type\":\"service_account\",…}）",
+        capabilities=["health", "grade"],
+        priority=40,
+    )
+
+    # ------------------------------------------------------------------ #
+    # config
+    # ------------------------------------------------------------------ #
+    def _cfg(self, ctx: CheckContext) -> GCPConfig:
+        return ctx.settings.gcp
 
     # ------------------------------------------------------------------ #
     # detection
@@ -109,6 +125,70 @@ class GCPPlugin(CheckerPlugin):
             and '"private_key"' in low
             and '"client_email"' in low
         )
+
+    # ------------------------------------------------------------------ #
+    # parsing / masking hooks
+    # ------------------------------------------------------------------ #
+    def mask(self, key: str) -> str | None:
+        """Show the (non-secret) client_email instead of a meaningless brace
+        fragment, so the row is identifiable."""
+        k = key.strip()
+        if not k.startswith("{"):
+            return None
+        try:
+            obj = json.loads(k)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(obj, dict) and obj.get("type") == "service_account":
+            email = obj.get("client_email") or obj.get("project_id") or "service_account"
+            return f"GCP:{email}"
+        return None
+
+    def extract_candidates(self, text: str) -> list[str] | None:
+        """Expand the ``gcp_service_accounts`` array of an all_combos aggregate
+        export into standalone service-account JSON credentials."""
+        if '"gcp_service_accounts"' not in text:
+            return None
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError, RecursionError):
+            return None
+        if not isinstance(obj, dict):
+            return None
+        # A standalone service-account key remains one credential even if it
+        # carries an unrelated metadata field named like the aggregate array.
+        if obj.get("type") == "service_account" or (
+            obj.get("private_key") and obj.get("client_email")
+        ):
+            return None
+        rows = obj.get("gcp_service_accounts")
+        if not isinstance(rows, list):
+            return None
+        credentials: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            email = str(row.get("client_email") or "").strip()
+            private_key = str(row.get("private_key") or "")
+            project_id = str(row.get("project_id") or "").strip()
+            if not project_id and "@" in email:
+                domain = email.rsplit("@", 1)[1]
+                if domain.endswith(_SA_DOMAIN):
+                    project_id = domain[: -len(_SA_DOMAIN)]
+            if not (email and private_key):
+                continue
+            info = {
+                "type": "service_account",
+                "project_id": project_id,
+                "private_key": private_key,
+                "client_email": email,
+                # Never trust an imported token endpoint: _mint_token POSTs a
+                # signed JWT assertion here, so arbitrary URLs would be SSRF and
+                # credential disclosure.
+                "token_uri": TOKEN_URI,
+            }
+            credentials.append(json.dumps(info, ensure_ascii=False, separators=(",", ":")))
+        return credentials
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -183,8 +263,7 @@ class GCPPlugin(CheckerPlugin):
             headers["Content-Type"] = "application/json"
         # Cap per-request time so unreachable regions/disabled APIs fail fast
         # instead of dragging the whole scan to a multi-minute crawl.
-        timeout = getattr(getattr(ctx.settings, "gcp", None), "probe_timeout_s", 8.0)
-        kw.setdefault("timeout", timeout)
+        kw.setdefault("timeout", self._cfg(ctx).probe_timeout_s)
         resp, _elapsed, exc = await timed_request(ctx.client, method, url, headers=headers, **kw)
         if exc is not None or resp is None:
             return None, None, "network"
@@ -426,12 +505,12 @@ class GCPPlugin(CheckerPlugin):
             result.remarks.append(f"数据库: {total_db} ({parts})")
 
     async def _scan_vertex(self, ctx, token, project, result: KeyResult, report, info) -> None:
-        cfg = getattr(ctx.settings, "gcp", None)
-        publishers = list(getattr(cfg, "publishers", None) or ["google"])
-        max_loc = int(getattr(cfg, "max_locations", 0) or 0)
+        cfg = self._cfg(ctx)
+        publishers = list(cfg.publishers or ["google"])
+        max_loc = cfg.max_locations
 
         # 1) Determine the regions to enumerate. Prefer the live locations list.
-        locations = list(getattr(cfg, "locations", None) or DEFAULT_LOCATIONS)
+        locations = list(cfg.locations or DEFAULT_LOCATIONS)
         status, data, _ = await self._get_json(
             ctx,
             f"https://aiplatform.googleapis.com/v1/projects/{project}/locations",
@@ -451,7 +530,7 @@ class GCPPlugin(CheckerPlugin):
 
         # 2) Enumerate the REAL model catalogue per region via the working
         #    v1beta1 publishers/{publisher}/models endpoint. No hardcoded names.
-        sem = asyncio.Semaphore(int(getattr(cfg, "region_concurrency", 12) or 12))
+        sem = asyncio.Semaphore(int(cfg.region_concurrency or 12))
 
         async def list_models(loc: str, publisher: str) -> tuple[str, str, list[str]]:
             async with sem:
@@ -544,7 +623,7 @@ class GCPPlugin(CheckerPlugin):
                     )
 
             # Then check fallback models (up to max_models - priority count)
-            max_models = int(getattr(cfg, "rate_probe_max_models", 12) or 12)
+            max_models = int(cfg.rate_probe_max_models or 12)
             remaining_slots = max(0, max_models - len(priority_callable))
             fallback_callable = []
             if remaining_slots > 0 and gen_fallback:
@@ -652,7 +731,7 @@ class GCPPlugin(CheckerPlugin):
         Tries regional probe_region first, then 'global' for models that 404 in
         the region (Claude, gemini-3.x often live only in global). Returns pairs
         that answer 200 or 429."""
-        probe_region = getattr(ctx.settings.gcp, "probe_region", "us-central1") if hasattr(ctx.settings, "gcp") else "us-central1"
+        probe_region = self._cfg(ctx).probe_region
         sem = asyncio.Semaphore(12)
 
         async def chk(model: str, loc: str) -> tuple[str, str, bool]:
@@ -676,9 +755,9 @@ class GCPPlugin(CheckerPlugin):
         to adapt between Gemini/Claude/image. '≥X' when no 429 hit."""
         import time
 
-        rps = float(getattr(cfg, "rpm_probe_rps", 50.0))
-        seconds = float(getattr(cfg, "rpm_probe_seconds", 8.0))
-        cap = int(getattr(cfg, "rpm_probe_cap", 400))
+        rps = float(cfg.rpm_probe_rps)
+        seconds = float(cfg.rpm_probe_seconds)
+        cap = int(cfg.rpm_probe_cap)
         url, body, _ = self._model_params(project, location, model, "hi", 1)
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         success = rate_limited = other = 0
@@ -741,12 +820,12 @@ class GCPPlugin(CheckerPlugin):
         and Claude (usage.input_tokens/output_tokens). '≥X' when no 429."""
         import time
 
-        per_req = int(getattr(cfg, "tpm_tokens_per_request", 200_000))
+        per_req = int(cfg.tpm_tokens_per_request)
         # Claude models have a 200k token context limit; use 100k per request.
         if model.startswith("claude"):
             per_req = min(per_req, 100_000)
-        max_req = int(getattr(cfg, "tpm_probe_max_requests", 40))
-        conc = int(getattr(cfg, "tpm_probe_concurrency", 8))
+        max_req = int(cfg.tpm_probe_max_requests)
+        conc = int(cfg.tpm_probe_concurrency)
         big_text = "word " * per_req
         url, body, extract_tokens = self._model_params(project, location, model, big_text, 1)
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}

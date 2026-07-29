@@ -29,9 +29,10 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import quote, urlparse
 
+from app.config import AWSBedrockConfig
 from app.http_util import timed_request
 from app.models import KeyResult, KeyStatus
-from app.plugins.base import CheckContext, CheckerPlugin
+from app.plugins.base import CheckContext, CheckerPlugin, PluginMeta
 from app.redact import redact
 
 # ---------------------------------------------------------------------------
@@ -139,12 +140,6 @@ def _sigv4_headers(
 
 _AK_RE = re.compile(r"^AKIA[0-9A-Z]{16}$")
 
-DEFAULT_REGIONS = [
-    "us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1",
-    "us-east-2", "ap-southeast-1", "eu-central-1", "ap-south-1",
-    "ap-southeast-2", "eu-west-2", "eu-west-3",
-]
-
 # Providers to prioritize when testing models
 _PRIO_PROVIDERS = ("anthropic", "xai", "meta", "mistral")
 
@@ -182,7 +177,18 @@ def foundation_model_arn(model_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 class AWSBedrockPlugin(CheckerPlugin):
-    name = "aws_bedrock"
+    meta = PluginMeta(
+        name="aws_bedrock",
+        version="1.0.0",
+        description="AWS Bedrock（IAM 凭证 SigV4）身份验证 + 跨区域模型可用性探测",
+        key_format_hint="AWS IAM（AKIA…:<secret>[:region] 或 AWS_ACCESS_KEY_ID=/AWS_SECRET_ACCESS_KEY= 环境变量对）",
+        capabilities=["health", "grade"],
+        priority=20,
+    )
+
+    # ---- config ----
+    def _cfg(self, ctx: CheckContext) -> AWSBedrockConfig:
+        return ctx.settings.aws_bedrock
 
     # ---- detection ----
     def matches(self, key: str) -> bool:
@@ -199,6 +205,64 @@ class AWSBedrockPlugin(CheckerPlugin):
         sk = parts[1] if len(parts) > 1 else ""
         region = parts[2] if len(parts) > 2 and parts[2] else None
         return ak, sk, region
+
+    # ---- parsing / masking hooks ----
+    def mask(self, key: str) -> str | None:
+        """Show the (non-secret) access key id, never the secret."""
+        k = key.strip()
+        if k.startswith("AKIA") and ":" in k:
+            return f"AWS:{k.split(':')[0]}"
+        return None
+
+    def stitch(self, lines: list[str], i: int) -> tuple[str | None, set[int]] | None:
+        """Fold ``AWS_ACCESS_KEY_ID=X`` + ``AWS_SECRET_ACCESS_KEY=Y`` env-var
+        pairs into one ``X:Y`` credential; swallow orphan secret lines."""
+        line = lines[i].strip()
+        if line.upper().startswith("AWS_ACCESS_KEY_ID="):
+            ak = line.split("=", 1)[1].strip()
+            for j in range(i + 1, min(i + 6, len(lines))):
+                nxt = lines[j].strip()
+                if nxt.startswith("#") or not nxt:
+                    continue
+                if nxt.upper().startswith("AWS_SECRET_ACCESS_KEY="):
+                    sk_val = nxt.split("=", 1)[1].strip()
+                    return f"{ak}:{sk_val}", {j}
+            return line, set()
+        if line.upper().startswith("AWS_SECRET_ACCESS_KEY="):
+            return None, set()  # orphan secret line — consumed silently
+        return None
+
+    def extract_candidates(self, text: str) -> list[str] | None:
+        """Expand the ``aws_iam_pairs`` array of an all_combos aggregate export
+        into ``AKIA…:SECRET`` credentials. ASIA temporary credentials require a
+        session token, which the aggregate schema does not provide — skipped."""
+        if '"aws_iam_pairs"' not in text:
+            return None
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError, RecursionError):
+            return None
+        if not isinstance(obj, dict):
+            return None
+        # A standalone service-account key remains one credential even if it
+        # carries an unrelated metadata field named like the aggregate array.
+        if obj.get("type") == "service_account" or (
+            obj.get("private_key") and obj.get("client_email")
+        ):
+            return None
+        rows = obj.get("aws_iam_pairs")
+        if not isinstance(rows, list):
+            return None
+        credentials: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            access_key = str(row.get("access_key_id") or "").strip()
+            secret_key = str(row.get("secret_access_key") or "").strip()
+            if not (_AK_RE.fullmatch(access_key) and secret_key):
+                continue
+            credentials.append(f"{access_key}:{secret_key}")
+        return credentials
 
     # ---- signed HTTP helpers ----
     async def _aws(
@@ -388,12 +452,12 @@ class AWSBedrockPlugin(CheckerPlugin):
     # ------------------------------------------------------------------ #
     async def grade_check(self, key: str, result: KeyResult, ctx: CheckContext) -> None:
         ak, sk, region_hint = self._parse(key)
-        cfg = getattr(ctx.settings, "aws_bedrock", None)
-        regions = list(getattr(cfg, "regions", None) or DEFAULT_REGIONS)
+        cfg = self._cfg(ctx)
+        regions = list(cfg.regions)
         if region_hint and region_hint not in regions:
             regions.insert(0, region_hint)
-        max_test = int(getattr(cfg, "max_models_per_region", 50) or 50)
-        test_conc = int(getattr(cfg, "test_concurrency", 8) or 8)
+        max_test = cfg.max_models_per_region
+        test_conc = cfg.test_concurrency
 
         # ---- Step 1: identity ----
         await ctx.progress(0.02, "STS 身份验证…")

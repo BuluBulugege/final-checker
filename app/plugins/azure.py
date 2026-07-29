@@ -17,18 +17,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 from urllib.parse import urlparse
 
+from app.config import AzureConfig
 from app.http_util import timed_request
-from app.models import ErrorClass, KeyResult, KeyStatus
-from app.plugins.base import CheckContext, CheckerPlugin
+from app.models import KeyResult, KeyStatus
+from app.plugins.base import CheckContext, CheckerPlugin, PluginMeta
 from app.redact import redact
 
 _AZURE_DOMAINS = (
     ".openai.azure.com",
     ".services.ai.azure.com",
     ".cognitiveservices.azure.com",
+)
+
+_AZURE_URL_RE = re.compile(
+    r"^https?://[^\s]+\.(openai\.azure\.com|services\.ai\.azure\.com|cognitiveservices\.azure\.com)",
+    re.IGNORECASE,
 )
 
 _FOUNDRY_DOMAINS = (".services.ai.azure.com",)
@@ -56,7 +63,25 @@ _PRIORITY_MODELS = [
 
 
 class AzurePlugin(CheckerPlugin):
-    name = "azure"
+    meta = PluginMeta(
+        name="azure",
+        version="1.0.0",
+        description="Azure OpenAI / AI Foundry 部署枚举 + 每部署 TPM/RPM 探测",
+        key_format_hint="Azure URL|KEY（https://<资源>.openai.azure.com|<api-key>）",
+        capabilities=["health", "grade"],
+        priority=30,
+    )
+
+    # ------------------------------------------------------------------ #
+    # config
+    # ------------------------------------------------------------------ #
+    def _cfg(self, ctx: CheckContext) -> AzureConfig:
+        return ctx.settings.azure
+
+    def _api_versions(self, ctx: CheckContext) -> list[str]:
+        """Configured primary api-version first, then the built-in fallbacks."""
+        primary = self._cfg(ctx).api_version
+        return [primary] + [v for v in _API_VERSIONS if v != primary]
 
     def matches(self, key: str) -> bool:
         k = key.strip()
@@ -92,6 +117,79 @@ class AzurePlugin(CheckerPlugin):
         host = urlparse(base_url).hostname or ""
         return any(host.endswith(d) for d in _FOUNDRY_DOMAINS)
 
+    # ------------------------------------------------------------------ #
+    # parsing / masking hooks
+    # ------------------------------------------------------------------ #
+    def mask(self, key: str) -> str | None:
+        """Show the resource host instead of the raw URL|KEY blob."""
+        k = key.strip()
+        if "|" not in k or "azure.com" not in k.lower():
+            return None
+        url_part = k.split("|", 1)[0].strip()
+        try:
+            host = urlparse(url_part).hostname or url_part[:30]
+        except Exception:
+            host = url_part[:30]
+        return f"Azure:{host}"
+
+    def stitch(self, lines: list[str], i: int) -> tuple[str | None, set[int]] | None:
+        """An Azure URL line followed by an API-key line becomes ``URL|KEY``."""
+        line = lines[i].strip()
+        if not (_AZURE_URL_RE.match(line) and "|" not in line):
+            return None
+        for j in range(i + 1, min(i + 4, len(lines))):
+            nxt = lines[j].strip()
+            if not nxt or nxt.startswith("#"):
+                continue
+            if not nxt.startswith("http") and len(nxt) > 16:
+                return f"{line}|{nxt}", {j}
+        return line, set()
+
+    def extract_candidates(self, text: str) -> list[str] | None:
+        """Expand the ``azure_openai_pairs`` array of an all_combos aggregate
+        export into ``URL|KEY`` credentials, canonicalizing each endpoint to
+        its origin so rows differing only by path or default port deduplicate."""
+        if '"azure_openai_pairs"' not in text:
+            return None
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError, RecursionError):
+            return None
+        if not isinstance(obj, dict):
+            return None
+        # A standalone service-account key remains one credential even if it
+        # carries an unrelated metadata field named like the aggregate array.
+        if obj.get("type") == "service_account" or (
+            obj.get("private_key") and obj.get("client_email")
+        ):
+            return None
+        rows = obj.get("azure_openai_pairs")
+        if not isinstance(rows, list):
+            return None
+        credentials: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            endpoint = str(row.get("endpoint") or "").strip()
+            api_key = str(row.get("api_key") or "").strip()
+            try:
+                parsed = urlparse(endpoint)
+                host = (parsed.hostname or "").lower()
+                port = parsed.port
+            except ValueError:
+                continue
+            if (
+                parsed.scheme.lower() == "https"
+                and parsed.netloc
+                and parsed.username is None
+                and parsed.password is None
+                and port in {None, 443}
+                and any(host.endswith(domain) for domain in _AZURE_DOMAINS)
+                and api_key
+            ):
+                credentials.append(f"https://{host}|{api_key}")
+        return credentials
+
     def _headers(self, api_key: str) -> dict[str, str]:
         return {"api-key": api_key, "Content-Type": "application/json"}
 
@@ -99,7 +197,8 @@ class AzurePlugin(CheckerPlugin):
         self, ctx: CheckContext, url: str, api_key: str
     ) -> tuple[int | None, Any | None, str | None]:
         resp, _, exc = await timed_request(
-            ctx.client, "GET", url, headers=self._headers(api_key)
+            ctx.client, "GET", url, headers=self._headers(api_key),
+            timeout=self._cfg(ctx).request_timeout_s,
         )
         if exc is not None or resp is None:
             return None, None, redact(repr(exc)) if exc else "no response"
@@ -118,7 +217,7 @@ class AzurePlugin(CheckerPlugin):
     async def _list_deployments(
         self, ctx: CheckContext, base_url: str, api_key: str
     ) -> tuple[list[dict], str | None]:
-        for api_ver in _API_VERSIONS:
+        for api_ver in self._api_versions(ctx):
             url = f"{base_url}/openai/deployments?api-version={api_ver}"
             status, data, err = await self._get_json(ctx, url, api_key)
             if status == 200 and isinstance(data, dict):
@@ -130,7 +229,7 @@ class AzurePlugin(CheckerPlugin):
     async def _list_models(
         self, ctx: CheckContext, base_url: str, api_key: str
     ) -> list[dict]:
-        for api_ver in _API_VERSIONS[:2]:
+        for api_ver in self._api_versions(ctx)[:2]:
             url = f"{base_url}/openai/models?api-version={api_ver}"
             status, data, _ = await self._get_json(ctx, url, api_key)
             if status == 200 and isinstance(data, dict):
@@ -144,7 +243,7 @@ class AzurePlugin(CheckerPlugin):
     ) -> dict[str, Any]:
         """Try classic Azure OpenAI deployment path first, then foundry path."""
         # --- classic: /openai/deployments/{id}/chat/completions ---
-        for api_ver in _API_VERSIONS[:2]:
+        for api_ver in self._api_versions(ctx)[:2]:
             url = (
                 f"{base_url}/openai/deployments/{deployment_id}"
                 f"/chat/completions?api-version={api_ver}"
@@ -152,6 +251,7 @@ class AzurePlugin(CheckerPlugin):
             body = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
             resp, elapsed, exc = await timed_request(
                 ctx.client, "POST", url, headers=self._headers(api_key), json=body,
+                timeout=self._cfg(ctx).request_timeout_s,
             )
             if exc is not None or resp is None:
                 continue
@@ -182,6 +282,7 @@ class AzurePlugin(CheckerPlugin):
         body = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
         resp, elapsed, exc = await timed_request(
             ctx.client, "POST", url, headers=self._headers(api_key), json=body,
+            timeout=self._cfg(ctx).request_timeout_s,
         )
         if exc is not None or resp is None:
             return result  # return the responses API result (has the error)
@@ -195,7 +296,7 @@ class AzurePlugin(CheckerPlugin):
         body = {"model": model, "input": "Say OK"}
         resp, elapsed, exc = await timed_request(
             ctx.client, "POST", url, headers=self._headers(api_key), json=body,
-            timeout=60.0,
+            timeout=self._cfg(ctx).request_timeout_s,
         )
         if exc is not None or resp is None:
             return {"alive": False, "error": redact(repr(exc)) if exc else "no response"}
@@ -380,7 +481,6 @@ class AzurePlugin(CheckerPlugin):
                         names.append(pm)
                         seen.add(pm)
                 # Strip date suffixes from catalog (e.g. "gpt-5.6-sol-2026-07-09" → "gpt-5.6-sol")
-                import re
                 _DATE_RE = re.compile(r"-\d{4}-\d{2}-\d{2}(-\w+)?$")
                 for mid in model_ids:
                     short = _DATE_RE.sub("", mid)

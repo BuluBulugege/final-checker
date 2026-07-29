@@ -193,9 +193,14 @@ async function loadPlugins() {
     const data = await res.json();
     els.pills.innerHTML = "";
     (data.plugins || []).forEach((p) => {
+      // /api/plugins returns full metadata objects; tolerate plain strings.
+      const meta = typeof p === "string" ? { name: p } : p;
       const span = document.createElement("span");
       span.className = "plugin-pill";
-      span.textContent = p;
+      span.textContent = meta.name;
+      if (meta.description) {
+        span.title = `${meta.name} v${meta.version || "?"} — ${meta.description}`;
+      }
       els.pills.appendChild(span);
     });
   } catch (_) {}

@@ -22,12 +22,14 @@ from app.models import (
     KeyStatus,
 )
 from app.plugins.base import CheckContext, mask_key, redact
-from app.plugins.registry import dispatch
+from app.plugins.registry import all_plugins, dispatch
 
 
 def _unsupported_reason(raw_key: str) -> str:
     """Give a precise reason when no plugin claimed a credential, instead of the
-    opaque 'no plugin matched'. For JSON-ish input we say why it didn't parse."""
+    opaque 'no plugin matched'. For JSON-ish input we say why it didn't parse.
+    The supported-format list is generated from the registered plugins' own
+    metadata, so a new plugin is automatically mentioned here."""
     k = raw_key.strip()
     if k.startswith("{"):
         import json
@@ -37,7 +39,8 @@ def _unsupported_reason(raw_key: str) -> str:
             return "JSON 已解析，但不是 service_account 凭证（缺 type/private_key/client_email）"
         except ValueError as exc:
             return redact(f"看起来是 JSON，但解析失败：{exc}") or "JSON 解析失败"
-    return "无法识别的密钥格式（不是 Gemini/OpenAI/Anthropic key，也不是 GCP service-account JSON）"
+    hints = "；".join(p.meta.key_format_hint for p in all_plugins() if p.meta.key_format_hint)
+    return f"无法识别的密钥格式（支持的格式：{hints}）"
 
 
 class Job:

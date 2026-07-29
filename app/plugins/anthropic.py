@@ -27,7 +27,7 @@ import httpx
 from app.config import AnthropicConfig
 from app.http_util import base_outcome, parse_retry_after, timed_request
 from app.models import CheckMode, ErrorClass, KeyResult, KeyStatus, ProbeOutcome
-from app.plugins.base import CheckContext, CheckerPlugin
+from app.plugins.base import CheckContext, CheckerPlugin, PluginMeta
 
 # Map of HTTP status / Anthropic error.type -> normalized ErrorClass. Anthropic's
 # JSON error body is {"type":"error","error":{"type":<t>,"message":...}}.
@@ -131,7 +131,14 @@ def _has_priority_header(headers: dict[str, str]) -> bool:
 class AnthropicPlugin(CheckerPlugin):
     """测活/测等级 for first-party Anthropic Claude API keys."""
 
-    name = "anthropic"
+    meta = PluginMeta(
+        name="anthropic",
+        version="1.0.0",
+        description="Anthropic Claude API 测活 + RPM 分级（50/1000/2000/4000 → T1–T4）",
+        key_format_hint="Anthropic key（sk-ant-…）",
+        capabilities=["health", "grade"],
+        priority=10,
+    )
 
     # ---- offline detection -------------------------------------------------
     def matches(self, key: str) -> bool:

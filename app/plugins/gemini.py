@@ -36,7 +36,7 @@ from app.models import (
     KeyStatus,
     ProbeOutcome,
 )
-from app.plugins.base import CheckContext, CheckerPlugin
+from app.plugins.base import CheckContext, CheckerPlugin, PluginMeta
 from app.ratetest import run_burst
 
 # AIza prefix + 35 url-safe chars = 39 chars total.
@@ -164,7 +164,14 @@ def _classify(resp: httpx.Response | None, base: ProbeOutcome) -> ProbeOutcome:
 class GeminiPlugin(CheckerPlugin):
     """Provider plugin for Google's Generative Language API (Gemini)."""
 
-    name = "gemini"
+    meta = PluginMeta(
+        name="gemini",
+        version="1.0.0",
+        description="Google Gemini / Generative Language API 测活 + 限速分级（突发 429 计时）",
+        key_format_hint="Gemini key（AIza…）",
+        capabilities=["health", "grade"],
+        priority=50,
+    )
 
     # ---- offline detection -------------------------------------------------
 
