@@ -8,7 +8,7 @@ The admin panel provides a web interface for managing API keys in long-term moni
 
 ### 1. Authentication
 - **Password-based login** with JWT token (24-hour expiry)
-- Default password: `bingxujingAb` (change in production via environment variable)
+- Default password: `change-me-in-production` (change in production via environment variable)
 - Token stored in browser localStorage
 
 ### 2. Key List & Filtering
@@ -189,7 +189,7 @@ app/
 # Login
 curl -X POST http://localhost:8000/api/long-term/auth \
   -H "Content-Type: application/json" \
-  -d '{"password":"bingxujingAb"}'
+  -d '{"password":"change-me-in-production"}'
 
 # List keys (with token)
 curl http://localhost:8000/api/long-term/keys \

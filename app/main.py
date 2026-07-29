@@ -62,6 +62,7 @@ async def get_config() -> dict:
         "max_concurrency": settings.max_concurrency,
         "default_concurrency": settings.default_concurrency,
         "max_keys_per_job": settings.max_keys_per_job,
+        "max_input_chars": settings.max_input_chars,
         "gemini": settings.gemini.model_dump(),
         "openai": {
             k: v
@@ -73,7 +74,10 @@ async def get_config() -> dict:
 
 
 def _parse_keys(raw: str) -> list[str]:
-    keys = parse_credentials(raw)
+    try:
+        keys = parse_credentials(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not keys:
         raise HTTPException(400, "no keys provided")
     if len(keys) > settings.max_keys_per_job:

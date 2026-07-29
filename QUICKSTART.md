@@ -12,7 +12,7 @@ uvicorn app.main:app --reload
 Navigate to: **http://localhost:8000/admin**
 
 ### 3. Login
-Password: `bingxujingAb`
+Password: `change-me-in-production`
 
 ---
 
@@ -79,7 +79,7 @@ No manual action required! The system keeps keys up-to-date.
 ## Troubleshooting
 
 ### Can't login?
-- Check password: `bingxujingAb` (default)
+- Check password: `change-me-in-production` (default)
 - Server running? Check terminal for errors
 - Try clearing browser localStorage
 
@@ -184,7 +184,7 @@ Before deploying:
 ## Support
 
 **Default credentials:**
-- Password: `bingxujingAb`
+- Password: `change-me-in-production`
 - JWT expiry: 24 hours
 
 **Endpoints:**

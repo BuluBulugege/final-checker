@@ -6,7 +6,7 @@ This API provides endpoints for managing API keys in long-term monitoring storag
 
 **Base URL:** `/api/long-term`
 
-**Admin Password:** `bingxujingAb` (configure via `ADMIN_PASSWORD` environment variable in production)
+**Admin Password:** `change-me-in-production` (configure via `ADMIN_PASSWORD` environment variable in production)
 
 ---
 
@@ -19,7 +19,7 @@ Authenticate admin and receive JWT token.
 **Request:**
 ```json
 {
-  "password": "bingxujingAb"
+  "password": "change-me-in-production"
 }
 ```
 
@@ -36,7 +36,7 @@ Authenticate admin and receive JWT token.
 const response = await fetch('/api/long-term/auth', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ password: 'bingxujingAb' })
+  body: JSON.stringify({ password: 'change-me-in-production' })
 });
 const { token } = await response.json();
 ```

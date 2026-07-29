@@ -7,7 +7,18 @@
 keys.txt
 keys/*.txt
 **/keys_input*.txt
+all_combos*.json
+**/all_combos*.json
+credential-bundles/
+azure-report.json
+bedrock-*.json
+gcp-*.json
+node_modules/
+.pi-lens/
 data.db*
+test_*.db
+test_*.db-shm
+test_*.db-wal
 *.sqlite3
 results/
 exports/
@@ -33,3 +44,14 @@ htmlcov/
 .idea/
 .vscode/
 *.log
+
+# --- One-off local probe/diagnostic scripts (make live billable calls; not product code) ---
+analyze_paid.py
+burst_test.py
+recheck_ok.py
+test_image.py
+probe_aws.mjs
+scan_models.mjs
+test_opus48.mjs
+package.json
+package-lock.json

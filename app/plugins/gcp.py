@@ -148,7 +148,9 @@ class GCPPlugin(CheckerPlugin):
         resp, _elapsed, exc = await timed_request(
             ctx.client,
             "POST",
-            info.get("token_uri", TOKEN_URI),
+            # Never send the signed JWT assertion to an imported arbitrary URL.
+            # Standard Google service-account credentials always use this endpoint.
+            TOKEN_URI,
             data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                 "assertion": assertion,

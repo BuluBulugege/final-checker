@@ -27,9 +27,11 @@ def setup_test_db(monkeypatch):
     # Initialize
     init_db(TEST_DB)
 
-    # Patch the DEFAULT_DB_PATH to use test database
-    from app import db
+    # Patch the database and auth secret for isolated tests.
+    from app import api_long_term, db
+
     monkeypatch.setattr(db, "DEFAULT_DB_PATH", TEST_DB)
+    monkeypatch.setattr(api_long_term, "ADMIN_PASSWORD", "test-admin-password")
 
     yield
 
@@ -50,7 +52,7 @@ def client():
 def auth_token(client):
     """Get authentication token."""
     response = client.post(
-        "/api/long-term/auth", json={"password": "bingxujingAb"}
+        "/api/long-term/auth", json={"password": "test-admin-password"}
     )
     assert response.status_code == 200
     return response.json()["token"]
@@ -66,6 +68,18 @@ class TestBasicEndpoints:
         data = response.json()
         assert "max_concurrency" in data
         assert "default_concurrency" in data
+        assert "max_input_chars" in data
+
+    def test_oversized_job_input_returns_400(self, client, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "max_input_chars", 10)
+        response = client.post(
+            "/api/jobs",
+            json={"keys": "x" * 11, "mode": "health", "concurrency": 1},
+        )
+        assert response.status_code == 400
+        assert "input too large" in response.json()["detail"]
 
     def test_plugins_endpoint(self, client):
         """Test plugins endpoint."""
@@ -82,7 +96,7 @@ class TestAuthentication:
     def test_auth_success(self, client):
         """Test successful authentication."""
         response = client.post(
-            "/api/long-term/auth", json={"password": "bingxujingAb"}
+            "/api/long-term/auth", json={"password": "test-admin-password"}
         )
         assert response.status_code == 200
         data = response.json()

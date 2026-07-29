@@ -115,7 +115,7 @@ class TestAuthenticationE2E:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{BASE_URL}/api/long-term/auth",
-                json={"password": "bingxujingAb"},
+                json={"password": "change-me-in-production"},
             )
             assert response.status_code == 200
             data = response.json()
@@ -149,7 +149,7 @@ async def get_auth_token() -> str:
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{BASE_URL}/api/long-term/auth",
-            json={"password": "bingxujingAb"},
+            json={"password": "change-me-in-production"},
         )
         assert response.status_code == 200
         return response.json()["token"]

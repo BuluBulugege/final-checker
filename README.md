@@ -16,6 +16,9 @@ uv run uvicorn app.main:app --reload
 # 或者用 CLI 批量跑
 uv run final-checker keys.txt --mode grade --concurrency 5
 cat keys.txt | uv run final-checker - --mode health
+
+# 聚合凭证包（自动展开 aws_iam_pairs / azure_openai_pairs / gcp_service_accounts）
+uv run final-checker all_combos.json --mode health --concurrency 20
 ```
 
 ## 两种模式
@@ -68,7 +71,7 @@ cat keys.txt | uv run final-checker - --mode health
 - **fable-5 数据共享**：检测到 fable-5 未开启时自动尝试调用 `foundation-model-entitlement` API 请求访问。
 - 报告按 provider 分组，Claude 模型单独列出每个区域的可用性。
 
-
+### GCP（Service Account）
 - 输入是**整块 service-account JSON**（`{"type":"service_account", ...}`）；粘进文本框即可，
   解析器自动把 JSON 块当成一条凭证识别（其余行仍按「每行一个」）。
 - 用私钥离线签 RS256 JWT，向 `oauth2.googleapis.com/token` 换 access token（官方 `google-auth` 签名 + httpx 异步换取，不引入 `requests`）。`invalid_grant` → 密钥失效。
@@ -113,6 +116,9 @@ app/
 | GCP | `{"type":"service_account",...}` | 整块 JSON |
 | Azure | `URL\|KEY` 或分行粘贴 | 自动拼接 |
 | AWS Bedrock | `AKIA...:SECRET` 或 env var 格式 | 自动拼接 |
+| 聚合凭证包 | `all_combos.json` | 自动展开 AWS/Azure/GCP 数组并稳定去重 |
+
+> 当前 Bedrock 插件只支持 `AKIA...` 长期 IAM 凭证；`ASIA...` 临时凭证（即使带 session token）会安全跳过，避免错误签名。真实凭证包默认被 `.gitignore` 排除，不应提交到仓库。
 
 ## REST API
 

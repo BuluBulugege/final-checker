@@ -29,7 +29,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    raw = sys.stdin.read() if args.keyfile == "-" else open(args.keyfile).read()
+    if args.keyfile == "-":
+        raw = sys.stdin.read()
+    else:
+        with open(args.keyfile, encoding="utf-8") as keyfile:
+            raw = keyfile.read()
     req = JobRequest(
         keys=raw,
         mode=CheckMode(args.mode),
@@ -42,7 +46,11 @@ def main() -> None:
 async def _run(req: JobRequest) -> None:
     from app.parsing import parse_credentials
 
-    keys = parse_credentials(req.keys)
+    try:
+        keys = parse_credentials(req.keys)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
     if not keys:
         print("no keys provided", file=sys.stderr)
         sys.exit(1)

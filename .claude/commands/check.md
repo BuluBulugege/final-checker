@@ -21,6 +21,9 @@ description: "Run API key checks via CLI or Web UI"
 # 从文件检查（测等级）
 uv run final-checker keys.txt --mode grade
 
+# all_combos.json 聚合凭证包（自动展开、去重；推荐先测活）
+uv run final-checker all_combos.json --mode health --concurrency 20
+
 # 从 stdin
 echo "sk-xxx" | uv run final-checker - --mode health
 
@@ -48,6 +51,9 @@ uv run uvicorn app.main:app --reload --port 8000
 | GCP | `{"type":"service_account",...}` JSON 块 |
 | Azure | `URL\|KEY` 或分行粘贴 URL + key |
 | AWS Bedrock | `AKIA...:SECRET` 或 `AWS_ACCESS_KEY_ID=...` 格式 |
+| 聚合凭证包 | `all_combos.json`：`aws_iam_pairs` / `azure_openai_pairs` / `gcp_service_accounts` |
+
+聚合包会稳定去重；当前 Bedrock 插件只支持 `AKIA`，所有 `ASIA` 临时凭证会安全跳过。真实凭证文件禁止加入 Git；只提交代码、测试和 skill。
 
 ### 模式说明
 

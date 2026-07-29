@@ -48,6 +48,93 @@ function countKeys() {
 function countCredentials(raw) {
   // strip BOM / zero-width junk so a pasted JSON key still counts as one block
   raw = raw.replace(/﻿/g, "").replace(/​/g, "");
+
+  // Aggregate all_combos.json: mirror the server's supported-row expansion.
+  try {
+    const combo = JSON.parse(raw);
+    if (combo && typeof combo === "object" && !Array.isArray(combo)) {
+      const comboKeys = [
+        "aws_iam_pairs",
+        "azure_openai_pairs",
+        "gcp_service_accounts",
+      ];
+      const looksLikeServiceAccount =
+        combo.type === "service_account" ||
+        (combo.private_key && combo.client_email);
+      const presentKeys = comboKeys.filter((key) => Object.hasOwn(combo, key));
+      const validComboSchema =
+        presentKeys.length > 0 &&
+        presentKeys.every((key) => Array.isArray(combo[key]));
+      if (!looksLikeServiceAccount && validComboSchema) {
+        const seen = new Set();
+        const add = (value) => {
+          if (value) seen.add(value);
+        };
+        const awsPattern = /^AKIA[0-9A-Z]{16}$/;
+        (Array.isArray(combo.aws_iam_pairs) ? combo.aws_iam_pairs : []).forEach(
+          (row) => {
+            if (!row || typeof row !== "object") return;
+            const accessKey = String(row.access_key_id || "").trim();
+            const secretKey = String(row.secret_access_key || "").trim();
+            if (awsPattern.test(accessKey) && secretKey) {
+              add(`aws:${accessKey}:${secretKey}`);
+            }
+          }
+        );
+        (Array.isArray(combo.azure_openai_pairs)
+          ? combo.azure_openai_pairs
+          : []
+        ).forEach((row) => {
+          if (!row || typeof row !== "object") return;
+          const endpoint = String(row.endpoint || "").trim();
+          const apiKey = String(row.api_key || "").trim();
+          try {
+            const url = new URL(endpoint);
+            const suffixes = [
+              ".openai.azure.com",
+              ".services.ai.azure.com",
+              ".cognitiveservices.azure.com",
+            ];
+            if (
+              url.protocol === "https:" &&
+              !url.username &&
+              !url.password &&
+              // Mirror the backend: only the default HTTPS port is accepted
+              // (url.port is "" for an implicit 443 or an explicit :443).
+              (url.port === "" || url.port === "443") &&
+              suffixes.some((suffix) => url.hostname.endsWith(suffix)) &&
+              apiKey
+            ) {
+              add(`azure:${url.origin.toLowerCase()}|${apiKey}`);
+            }
+          } catch (_) {}
+        });
+        (Array.isArray(combo.gcp_service_accounts)
+          ? combo.gcp_service_accounts
+          : []
+        ).forEach((row) => {
+          if (!row || typeof row !== "object") return;
+          const email = String(row.client_email || "").trim();
+          const privateKey = String(row.private_key || "");
+          let projectId = String(row.project_id || "").trim();
+          const suffix = ".iam.gserviceaccount.com";
+          if (!projectId && email.includes("@")) {
+            const domain = email.split("@").pop();
+            if (domain.endsWith(suffix)) {
+              projectId = domain.slice(0, -suffix.length);
+            }
+          }
+          if (email && privateKey) {
+            add(`gcp:${projectId}:${email}:${privateKey}`);
+          }
+        });
+        return seen.size;
+      }
+    }
+  } catch (_) {
+    // Not a standalone JSON object — continue with mixed-text parsing.
+  }
+
   let count = 0;
   let i = 0;
   const n = raw.length;

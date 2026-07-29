@@ -8,12 +8,120 @@ one credential per line. Order is preserved by position in the original text.
 
 from __future__ import annotations
 
+import json
 import re
+from urllib.parse import urlparse
 
 _AZURE_URL_RE = re.compile(
     r"^https?://[^\s]+\.(openai\.azure\.com|services\.ai\.azure\.com|cognitiveservices\.azure\.com)",
     re.IGNORECASE,
 )
+_GCP_SERVICE_ACCOUNT_DOMAIN = ".iam.gserviceaccount.com"
+_GCP_TOKEN_URI = "https://oauth2.googleapis.com/token"
+_AZURE_HOST_SUFFIXES = (
+    ".openai.azure.com",
+    ".services.ai.azure.com",
+    ".cognitiveservices.azure.com",
+)
+_AWS_ACCESS_KEY_RE = re.compile(r"^AKIA[0-9A-Z]{16}$")
+_COMBO_KEYS = {"aws_iam_pairs", "azure_openai_pairs", "gcp_service_accounts"}
+
+
+def _combo_credentials(obj: object) -> list[str] | None:
+    """Expand an ``all_combos.json`` aggregate into checker credentials.
+
+    Returns ``None`` for ordinary JSON so the standard JSON-block parser remains
+    unchanged. Invalid/incomplete aggregate rows are skipped; in particular ASIA
+    temporary credentials require a session token, which the aggregate schema
+    currently does not provide.
+    """
+    if not isinstance(obj, dict):
+        return None
+    # A standalone service-account key remains one credential even if it carries
+    # an unrelated metadata field named like one of the aggregate arrays.
+    if obj.get("type") == "service_account" or (
+        obj.get("private_key") and obj.get("client_email")
+    ):
+        return None
+    present = _COMBO_KEYS & obj.keys()
+    if not present or any(not isinstance(obj[key], list) for key in present):
+        return None
+
+    credentials: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        value = value.strip()
+        if value and value not in seen:
+            seen.add(value)
+            credentials.append(value)
+
+    aws_rows = obj.get("aws_iam_pairs", [])
+    if isinstance(aws_rows, list):
+        for row in aws_rows:
+            if not isinstance(row, dict):
+                continue
+            access_key = str(row.get("access_key_id") or "").strip()
+            secret_key = str(row.get("secret_access_key") or "").strip()
+            if not (_AWS_ACCESS_KEY_RE.fullmatch(access_key) and secret_key):
+                continue
+            add(f"{access_key}:{secret_key}")
+
+    azure_rows = obj.get("azure_openai_pairs", [])
+    if isinstance(azure_rows, list):
+        for row in azure_rows:
+            if not isinstance(row, dict):
+                continue
+            endpoint = str(row.get("endpoint") or "").strip()
+            api_key = str(row.get("api_key") or "").strip()
+            try:
+                parsed = urlparse(endpoint)
+                host = (parsed.hostname or "").lower()
+                port = parsed.port
+            except ValueError:
+                continue
+            if (
+                parsed.scheme.lower() == "https"
+                and parsed.netloc
+                and parsed.username is None
+                and parsed.password is None
+                and port in {None, 443}
+                and any(host.endswith(suffix) for suffix in _AZURE_HOST_SUFFIXES)
+                and api_key
+            ):
+                # Provider plugins use only the resource origin; canonicalizing
+                # here prevents duplicate rows that differ only by API path or
+                # an explicit default HTTPS port.
+                origin = f"https://{host}"
+                add(f"{origin}|{api_key}")
+
+    gcp_rows = obj.get("gcp_service_accounts", [])
+    if isinstance(gcp_rows, list):
+        for row in gcp_rows:
+            if not isinstance(row, dict):
+                continue
+            email = str(row.get("client_email") or "").strip()
+            private_key = str(row.get("private_key") or "")
+            project_id = str(row.get("project_id") or "").strip()
+            if not project_id and "@" in email:
+                domain = email.rsplit("@", 1)[1]
+                if domain.endswith(_GCP_SERVICE_ACCOUNT_DOMAIN):
+                    project_id = domain[: -len(_GCP_SERVICE_ACCOUNT_DOMAIN)]
+            if not (email and private_key):
+                continue
+            info = {
+                "type": "service_account",
+                "project_id": project_id,
+                "private_key": private_key,
+                "client_email": email,
+                # Never trust an imported token endpoint: _mint_token POSTs a
+                # signed JWT assertion here, so arbitrary URLs would be SSRF and
+                # credential disclosure.
+                "token_uri": _GCP_TOKEN_URI,
+            }
+            add(json.dumps(info, ensure_ascii=False, separators=(",", ":")))
+
+    return credentials
 
 
 def _preprocess_raw(raw: str) -> str:
@@ -134,11 +242,33 @@ def parse_credentials(raw: str) -> list[str]:
     - Text outside JSON blocks is split by line, one credential per non-empty line.
     Positions are interleaved so the output order matches the input order.
     """
-    raw = _preprocess_raw(raw)
+    from app.config import settings
+
+    if len(raw) > settings.max_input_chars:
+        raise ValueError(f"input too large (max {settings.max_input_chars} characters)")
+
     # Strip a UTF-8 BOM / zero-width junk that editors and web copies often
     # prepend; an invisible char before "{" would otherwise hide the JSON block
     # and the whole key would be split line-by-line ("no plugin matched").
     raw = raw.replace("﻿", "").replace("​", "")
+
+    # Aggregate export files are one JSON object containing provider-specific
+    # arrays. Expand them before line preprocessing, which is intended for pasted
+    # env-var/URL pairs rather than structured JSON.
+
+    # Cheap marker check avoids decoding every ordinary service-account JSON
+    # twice while still recognizing standalone aggregate exports.
+    aggregate = None
+    stripped = raw.lstrip()
+    if stripped.startswith("{") and any(f'"{key}"' in raw for key in _COMBO_KEYS):
+        try:
+            aggregate = _combo_credentials(json.loads(raw))
+        except (ValueError, TypeError, RecursionError):
+            aggregate = None
+    if aggregate is not None:
+        return aggregate
+
+    raw = _preprocess_raw(raw)
     blocks = _extract_json_blocks(raw)
     creds: list[tuple[int, str]] = []
 

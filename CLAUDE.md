@@ -8,7 +8,7 @@
 - 配置在 `app/config.py`，所有阈值/速率/模型ID 集中管理，可被 `FC_` 前缀环境变量覆盖
 - HTTP 请求统一用 `app/http_util.py` 的 `timed_request()`
 - 密钥脱敏用 `app/redact.py`
-- 输入解析在 `app/parsing.py`，支持 JSON 块 + 多行凭证自动拼接
+- 输入解析在 `app/parsing.py`，支持 JSON 块、多行凭证自动拼接，以及 `all_combos.json` 聚合包展开/去重
 
 ## 6 个插件
 

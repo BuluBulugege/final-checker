@@ -234,13 +234,17 @@ class LongTermKeyManager:
             )
 
             try:
-                await plugin.check(key_data, result, ctx)
+                await plugin.health_check(key_data, result, ctx)
             except Exception as e:
                 result.status = KeyStatus.ERROR
                 result.error = str(e)
 
         # Convert result to dict
-        status = "alive" if result.status == KeyStatus.SUCCESS else "dead"
+        status = (
+            "alive"
+            if result.status in {KeyStatus.ALIVE, KeyStatus.GRADED}
+            else "dead"
+        )
 
         # Extract error class from result.error if available
         error_class = None

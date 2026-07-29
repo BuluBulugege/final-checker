@@ -62,8 +62,21 @@ class AzurePlugin(CheckerPlugin):
         k = key.strip()
         if "|" not in k:
             return False
-        url_part = k.split("|", 1)[0].strip().lower()
-        return url_part.startswith("http") and any(d in url_part for d in _AZURE_DOMAINS)
+        url_part = k.split("|", 1)[0].strip()
+        try:
+            parsed = urlparse(url_part)
+            host = (parsed.hostname or "").lower()
+            port = parsed.port
+        except ValueError:
+            return False
+        return (
+            parsed.scheme.lower() == "https"
+            and parsed.username is None
+            and parsed.password is None
+            and port in {None, 443}
+            and any(host.endswith(domain) for domain in _AZURE_DOMAINS)
+            and bool(k.split("|", 1)[1].strip())
+        )
 
     @staticmethod
     def _parse(key: str) -> tuple[str, str]:

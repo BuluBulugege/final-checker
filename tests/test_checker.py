@@ -28,7 +28,14 @@ from app.ratetest import run_burst
 # --------------------------------------------------------------------------- #
 def test_all_plugins_registered():
     names = {p.name for p in all_plugins()}
-    assert names == {"gemini", "openai", "anthropic", "gcp"}
+    assert names == {
+        "gemini",
+        "openai",
+        "anthropic",
+        "gcp",
+        "azure",
+        "aws_bedrock",
+    }
 
 
 @pytest.mark.parametrize(
@@ -41,6 +48,11 @@ def test_all_plugins_registered():
         ("sk-" + "a" * 40, "openai"),
         ("sk-ant-api03-" + "a" * 40, "anthropic"),
         ("sk-ant-oat01-" + "a" * 40, "anthropic"),
+        ("https://foo.openai.azure.com@attacker.example|secret", None),
+        ("http://example.openai.azure.com|secret", None),
+        ("https://example.openai.azure.com:8443|secret", None),
+        ("https://example.openai.azure.com|", None),
+        ("https://[bad|secret", None),
         ("garbage", None),
         ("", None),
     ],

@@ -136,6 +136,7 @@ class Settings(BaseSettings):
     # how long a completed job is kept in memory before eviction
     job_ttl_seconds: float = 3600.0
     max_keys_per_job: int = 500
+    max_input_chars: int = 10_000_000
 
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)

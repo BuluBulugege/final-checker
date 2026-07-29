@@ -253,7 +253,7 @@ uvicorn app.main:app --reload
 
 ### Access Admin Panel
 1. Open browser: `http://localhost:8000/admin`
-2. Login with password: `bingxujingAb`
+2. Login with password: `change-me-in-production`
 3. JWT token valid for 24 hours
 
 ### Typical Workflow
